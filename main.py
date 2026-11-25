@@ -40,7 +40,7 @@ def wav_input(path):
 def demo_block(start, calibration, quiet, carriers):
     """Simulate a stereo capture. This source has no playback device."""
     t = (start + np.arange(HOP))/RATE
-    result = np.zeros((HOP, 2), np.float32)
+    result = np.random.default_rng(start).normal(0, 0.00008, (HOP, 2)).astype(np.float32)
     if start / RATE < calibration:
         return result
     since = t - calibration - quiet
@@ -139,7 +139,7 @@ def run(args):
     carriers = (args.left_freq, args.right_freq)
     if recording is None and not args.simulate:
         engine = AudioEngine(args.input_device, args.output_device, carriers, args.max_volume,
-                             args.exclusive)
+                             args.exclusive, args.session_seconds, args.duty_window)
         source = "Live / WASAPI RAW requested"
     else:
         engine = None
@@ -178,7 +178,7 @@ def run(args):
             snap = worker.latest
             tx = engine.tx if engine else None
             health = dict(source=source, camera=cam.status, peak=tx.peak if tx else 0,
-                          used=tx.used/RATE if tx else 0,
+                          used=tx.used/RATE if tx else 0, budget=tx.session/RATE if tx else 120,
                           remaining=(tx.session-tx.used)/RATE if tx else 120,
                           reason=tx.reason if tx else "playback disabled",
                           xruns=engine.xruns if engine else 0,
@@ -219,7 +219,7 @@ def run(args):
     print(json.dumps(dict(source=source, frames=frame_count, fps=round(frame_count/elapsed, 2),
                           shape=list(frame.shape), dtype=str(frame.dtype), blocks=worker.blocks,
                           stream_closed=engine.stream is None if engine else None,
-                          output_seconds=engine.tx.used/RATE if engine else 0,
+                          output_seconds=engine.tx.total_emitted/RATE if engine else 0,
                           xruns=health["xruns"], drops=health["drops"], camera=cam.status,
                           camera_error=cam.error, sent=cam.frames, state=worker.latest["state"],
                           gestures=[e.name for e in worker.latest["events"]],
@@ -234,6 +234,10 @@ def parser():
     p.add_argument("--left-freq", type=float, default=CARRIERS[0])
     p.add_argument("--right-freq", type=float, default=CARRIERS[1])
     p.add_argument("--max-volume", type=float, default=DEFAULT_GAIN, help="linear peak amplitude")
+    p.add_argument("--session-seconds", type=float, default=120,
+                   help="maximum continuous and cumulative on-time in the duty window, up to 120 s")
+    p.add_argument("--duty-window", type=float, default=180,
+                   help="rolling exposure window in seconds, 180..3600")
     p.add_argument("--calibration-duration", type=float, default=3, help="muted ambient seconds")
     p.add_argument("--exclusive", action="store_true", help="request exclusive WASAPI with RAW")
     p.add_argument("--no-virtual-cam", "--preview-only", action="store_true")

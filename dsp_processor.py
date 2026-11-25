@@ -322,7 +322,10 @@ class DSPProcessor:
         self.origin = self.expected / RATE
         self.gains = np.maximum(abs(self.baseline)**2, 1e-12)
         self.noise = np.median(abs(aligned-self.baseline), axis=0) / np.sqrt(self.gains)
-        self.path_snr = 10*np.log10(self.gains / np.median(self.ambient, axis=2))
+        # An unrelated pilot already present while muted cannot qualify a TX path.
+        ambient_carrier = self.ambient[:, :, 31:34].max(axis=2)
+        self.path_snr = 10*np.log10(self.gains / np.maximum(
+            ambient_carrier, np.median(self.ambient, axis=2)))
         self.snr = self.path_snr.max(axis=1)
         self.usable = self.path_snr >= 15
         self.state = "sensing"
@@ -427,6 +430,7 @@ class DSPProcessor:
                     radar=self.radar.copy(), target=self.target, spectrum=self.spectrum.copy(),
                     waterfall=fall, waveform=self.breath.waveform(), bpm=self.breath.bpm,
                     quality=self.breath.quality, breath_state=self.breath.state,
+                    clean_seconds=self.breath.count/100,
                     events=tuple(self.gestures.log), lateral=bool(self.cue_maps),
                     zones=tuple(self.zones), zone=self.zone[0] if self.zone else None,
                     snr=self.snr.copy(), carriers=self.carriers.copy())

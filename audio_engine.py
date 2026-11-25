@@ -70,7 +70,8 @@ class Transmitter:
     """Account in DAC frames. The same budget survives every manual toggle."""
 
     def __init__(self, carriers=CARRIERS, gain=DEFAULT_GAIN, session=120, window=180):
-        if not (0 < gain <= MAX_GAIN and 0 < session <= 120 and session <= window):
+        if not (0 < gain <= MAX_GAIN and HOP/RATE <= session <= 120
+                and 180 <= window <= 3600):
             raise ValueError("Invalid output cap or time budget.")
         self.gain = gain
         self.session = round(session * RATE)
@@ -86,6 +87,8 @@ class Transmitter:
         self.intervals = deque()
         self.peak = 0.0
         self.used = self.continuous = 0
+        self.total_emitted = 0
+        self.fault_pending = False
 
     def arm(self):
         with self.lock:
@@ -104,6 +107,8 @@ class Transmitter:
 
     def fill(self, out, start, fault=False):
         out.fill(0)
+        if fault:
+            self.fault_pending = True
         if not self.lock.acquire(blocking=False):
             return False
         try:
@@ -114,9 +119,10 @@ class Transmitter:
             if self.intervals and self.intervals[0][0] < cutoff:
                 self.intervals[0][0] = cutoff
             self.used = sum(b - a for a, b in self.intervals)
-            if fault or (self.armed and monotonic() - self.heartbeat > 0.5):
+            if self.fault_pending or (self.armed and monotonic() - self.heartbeat > 0.5):
                 self.armed = False
-                self.reason = "stream fault" if fault else "control timeout"
+                self.reason = "stream fault" if self.fault_pending else "control timeout"
+                self.fault_pending = False
             if self.armed and max(self.used, self.continuous) + len(out) > self.session:
                 self.armed = False
                 self.reason = "time limit"
@@ -136,6 +142,7 @@ class Transmitter:
                 self.intervals.append([start, start + len(out)])
             self.continuous += len(out)
             self.used += len(out)
+            self.total_emitted += len(out)
             return True
         finally:
             self.lock.release()
@@ -171,10 +178,10 @@ def raw_settings(exclusive):
 
 class AudioEngine:
     def __init__(self, input_id=None, output_id=None, carriers=CARRIERS,
-                 gain=DEFAULT_GAIN, exclusive=False):
+                 gain=DEFAULT_GAIN, exclusive=False, session=120, window=180):
         self.devices = wasapi_devices(input_id, output_id)
         self.channels = min(2, sd.query_devices(self.devices[0])["max_input_channels"])
-        self.tx = Transmitter(carriers, gain)
+        self.tx = Transmitter(carriers, gain, session, window)
         self.exclusive = exclusive
         self.stream = None
         self.start = self.xruns = self.blocks = 0

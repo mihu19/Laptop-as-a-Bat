@@ -67,6 +67,7 @@ def render(snapshot, health):
     label(frame, "+ toward / - away     approx. radial m/s", x0, 482, 0.42, DIM)
 
     panel(frame, 642, 82, 612, 255, "Doppler spectrum")
+    label(frame, "0-50 dB over floor  /  4 s waterfall", 944, 108, 0.42, DIM)
     for i, (name, color) in enumerate((("L", AMBER), ("R", MINT))):
         x = 661+i*295
         freq = snapshot["carriers"][i] / 1000
@@ -76,13 +77,18 @@ def render(snapshot, health):
         fall = np.uint8(np.clip(snapshot["waterfall"][:, i, :]/50, 0, 1)*255)
         strip = cv2.applyColorMap(fall, cv2.COLORMAP_VIRIDIS)
         frame[207:294, x:x+273] = cv2.resize(strip, (273, 87))
-        label(frame, "-400          0         +400 Hz", x, 314, 0.44, DIM)
+        label(frame, "-400", x, 314, 0.44, DIM)
+        label(frame, "0", x+132, 314, 0.44, DIM)
+        label(frame, "+400 Hz", x+210, 314, 0.44, DIM)
 
     panel(frame, 642, 352, 612, 195, "Breathing")
     bpm = snapshot["bpm"]
     label(frame, f"{bpm:.1f}" if bpm is not None else "--", 658, 445, 1.52, MINT, 2)
     label(frame, "breaths/min", 660, 474, 0.48, DIM)
-    label(frame, snapshot["breath_state"], 660, 519, 0.47, MINT)
+    breath_state = snapshot["breath_state"]
+    if breath_state == "acquiring":
+        breath_state += f' {snapshot["clean_seconds"]:.0f}s'
+    label(frame, breath_state, 660, 519, 0.47, MINT)
     wave = snapshot["waveform"]
     x, y = 846, 402
     cv2.line(frame, (x, y+45), (1232, y+45), LINE)
@@ -110,7 +116,7 @@ def render(snapshot, health):
     label(frame, f'{health["used"]:.1f} s on / {health["remaining"]:.1f} s left',
           844, 585, 0.46)
     cv2.rectangle(frame, (846, 602), (1229, 615), LINE, -1)
-    fraction = np.clip(health["used"]/120, 0, 1)
+    fraction = np.clip(health["used"]/health["budget"], 0, 1)
     if fraction:
         cv2.rectangle(frame, (846, 602), (846+round(383*fraction), 615), AMBER, -1)
 
