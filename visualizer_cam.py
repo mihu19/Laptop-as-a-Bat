@@ -197,7 +197,7 @@ def render_sonar(snapshot, health, hud=True):
     label(frame, f'{health["reason"]}   {health["remaining"]:.0f}s available',
           30, HEIGHT-29, .48, DIM)
     label(frame, "C  calibrate     M  mute     R  resume     H  hide     V  view",
-          850, HEIGHT-29, .47, DIM)
+          768, HEIGHT-29, .47, DIM)
     return frame
 
 

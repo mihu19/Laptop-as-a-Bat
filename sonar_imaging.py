@@ -140,11 +140,14 @@ class RangeCamera:
                 pass
         self.reset()
 
-    def reset(self):
+    def reset(self, keep_background=False):
         self.cursor = 0
-        self.background = None
-        self.noise = None
-        self.activity = None
+        if not keep_background:
+            self.background = None
+            self.noise = None
+            self.activity = None
+        elif self.activity is not None:
+            self.activity.fill(0)
         self.reference = None
         self.previous_echo = None
         self.locked = False

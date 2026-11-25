@@ -74,6 +74,7 @@ class Worker:
         self.recording = recording
         self.range_cam = range_cam
         self.range_start = None
+        self.learn_room = True
         self.expected = None
         self.stop = Event()
         self.ended = Event()
@@ -102,19 +103,22 @@ class Worker:
         cam = self.range_cam
         if cam is None:
             return
-        if not block.active or block.gap or block.start != self.expected:
-            if self.range_start is not None:
-                cam.reset()
+        discontinuity = self.expected is not None and (block.gap or block.start != self.expected)
+        if not block.active or discontinuity:
+            if self.range_start is not None or discontinuity:
+                cam.reset(keep_background=not discontinuity)
             self.range_start = None
         self.expected = block.start + HOP
         if not block.active or block.gap:
             return
         if self.range_start is None:
             self.range_start = block.start
+            self.learn_room = cam.background is None
         elapsed = (block.start-self.range_start)/RATE
         if elapsed >= .12:
-            cam.process(block.samples, learn=elapsed < 1.4)
-            cam.guide_step(block.start/RATE)
+            cam.process(block.samples, learn=self.learn_room and elapsed < 1.4)
+            if cam.cursor == 0:
+                cam.guide_step(block.start/RATE)
 
     def _run(self):
         try:
