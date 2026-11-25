@@ -6,7 +6,10 @@ from functools import lru_cache
 import cv2
 import numpy as np
 
+from ofdm_ranging import ROOM_SECONDS
+
 WIDTH, HEIGHT, FPS = 1280, 720, 30
+ECHO_HISTORY_FRAMES = 100
 BG = (22, 21, 18)
 PANEL = (32, 31, 27)
 LINE = (67, 65, 56)
@@ -202,6 +205,132 @@ def render_sonar(snapshot, health, hud=True):
     return frame
 
 
+def paint_echoes(area, levels):
+    gray = cv2.resize(np.uint8(255*levels), (area.shape[1], area.shape[0]),
+                      interpolation=cv2.INTER_NEAREST)
+    np.copyto(area, cv2.applyColorMap(gray, cv2.COLORMAP_TURBO), where=(gray > 0)[:, :, None])
+
+
+def plot_echo_history(area, history):
+    width = max(1, round(area.shape[1]*len(history)/ECHO_HISTORY_FRAMES))
+    paint_echoes(area[:, -width:], history.T[::-1])
+
+
+def render_echo_map(snapshot, health):
+    """Render the live radar measurements shared by the preview and virtual camera."""
+    frame = np.full((HEIGHT, WIDTH, 3), BG, dtype=np.uint8)
+    profile = snapshot["echo_profile"]
+    ranges = snapshot["echo_ranges"]
+    peak = int(profile.argmax())
+    active = snapshot["state"] == "sensing"
+    locked = active and snapshot["depth_locked"]
+    has_echo = locked and profile[peak] > 0
+    room_ready = snapshot.get("room_ready")
+    tracked_range = snapshot.get("tracked_range")
+    spatial = snapshot.get("spatial")
+
+    label(frame, "Bat Cam", 32, 58, 1.26, TEXT, 2)
+    if not active:
+        status = ("Clear the area, then press M to calibrate"
+                  if room_ready is not None or spatial is not None else "Probe muted")
+    elif spatial is not None:
+        status = spatial["status"]
+    elif not locked:
+        status = "Waiting for probe timing"
+    elif room_ready is False:
+        status = f"Measuring the empty room   /   stand clear for {ROOM_SECONDS:.0f}s"
+    elif tracked_range is not None:
+        status = "Tracking an echo"
+    elif not has_echo:
+        status = "Waiting for an echo   /   move into range" if room_ready else "No echo in range"
+    else:
+        status = "Echo detected" if room_ready is None else "Checking echo stability"
+    status_ready = has_echo if spatial is None else spatial["image"].any()
+    label(frame, status, 35, 91, .60, MINT if status_ready else DIM)
+    if health.get("simulated"):
+        source = "SIMULATION"
+    elif health.get("replay"):
+        source = "WAV REPLAY"
+    else:
+        source = "LIVE MICROPHONE"
+    source_size = cv2.getTextSize(source, cv2.FONT_HERSHEY_DUPLEX, .56, 1)[0][0]
+    label(frame, source, WIDTH-34-source_size, 59, .56, AMBER if source != "LIVE MICROPHONE" else DIM)
+
+    panel(frame, 32, 116, 807, 536, "Front projection of echoes" if spatial is not None else "Echo trail")
+    left, right, top, bottom = 116, 812, 192, 554
+    if spatial is not None:
+        left, right = 227, 647
+    label(frame, "Possible height (cm)" if spatial is not None else "Approx. distance (cm)",
+          52, 173, .47, DIM)
+    graph = frame[top:bottom+1, left:right+1]
+    graph[:] = BG
+    vertical = ranges if spatial is None else spatial["y"][::-1]
+    ticks = np.linspace(vertical[0], vertical[-1], 5)
+    for i, distance in enumerate(ticks):
+        y = bottom-round(i*(bottom-top)/(len(ticks)-1))
+        cv2.line(frame, (left, y), (right, y), LINE, 1)
+        label(frame, f"{distance*100:.0f}", left-43, y+5, .49, DIM)
+    for x in (left, (left+right)//2, right):
+        cv2.line(frame, (x, top), (x, bottom), LINE, 1)
+    history = snapshot.get("echo_history")
+    if active and spatial is not None:
+        paint_echoes(graph, spatial["image"])
+    elif spatial is None and locked and history is not None and len(history):
+        plot_echo_history(graph, history)
+    if spatial is not None:
+        label(frame, f'{spatial["x"][0]*100:.0f} cm', left-24, 580, .45, DIM)
+        label(frame, "0", (left+right)//2-5, 580, .45, DIM)
+        label(frame, f'{spatial["x"][-1]*100:.0f} cm', right-23, 580, .45, DIM)
+        label(frame, "Left / right (approx.)", 52, 628, .47, DIM)
+    else:
+        label(frame, "3 s ago", left, 580, .51, DIM)
+        label(frame, "Now", right-35, 580, .51, DIM)
+    legend = cv2.applyColorMap(np.uint8(np.linspace(30, 245, 106))[None, :], cv2.COLORMAP_TURBO)
+    frame[616:629, 625:731] = legend
+    label(frame, "Weak", 573, 628, .45, DIM)
+    label(frame, "Strong", 744, 628, .45, DIM)
+
+    panel(frame, 858, 116, 390, 536, "Echo profile")
+    label(frame, "Relative strength by distance", 874, 172, .47, DIM)
+    chart_x, chart_y, chart_w, chart_h = 879, 195, 347, 105
+    cv2.line(frame, (chart_x, chart_y+chart_h-1), (chart_x+chart_w-1, chart_y+chart_h-1), LINE)
+    if has_echo:
+        trace(frame, np.sqrt(profile/profile[peak]), chart_x, chart_y, chart_w, chart_h, 0, 1, MINT)
+    label(frame, f"{ranges[0]*100:.0f} cm", chart_x, 323, .47, DIM)
+    label(frame, f"{ranges[-1]*100:.0f} cm", chart_x+chart_w-56, 323, .47, DIM)
+
+    label(frame, "Strongest echo", 874, 369, .48, DIM)
+    label(frame, f"~{ranges[peak]*100:.0f} cm" if has_echo else "--", 874, 405, .82)
+    label(frame, "Echo SNR", 1072, 369, .48, DIM)
+    noise = snapshot["echo_noise_power"]
+    snr = 10*np.log10(profile[peak]/noise) if has_echo and noise > 0 else None
+    label(frame, f"{snr:.1f} dB" if snr is not None else "--", 1072, 405, .76)
+
+    events = snapshot["events"]
+    if spatial is not None:
+        label(frame, "Range history   /   last 3 s", 874, 462, .48, DIM)
+        history_plot = frame[478:610, chart_x:chart_x+chart_w]
+        history_plot[:] = BG
+        if locked and history is not None and len(history):
+            plot_echo_history(history_plot, history)
+        label(frame, f'{spatial["paths"]}/4 timing paths   /   {spatial["echo_paths"]}/4 echo paths',
+              874, 633, .44, DIM)
+    elif room_ready is None:
+        gesture = events[-1].name if has_echo and events and snapshot["time"]-events[-1].time < 1.5 else "--"
+        label(frame, "Recent gesture", 874, 462, .48, DIM)
+        label(frame, gesture, 874, 498, .73, AMBER if gesture != "--" else TEXT)
+        label(frame, "Breathing", 874, 552, .48, DIM)
+        bpm = snapshot["range_bpm"] if has_echo else None
+        label(frame, f"{bpm:.1f} BPM" if bpm is not None else "--", 874, 588, .73)
+    else:
+        label(frame, "Tracked range", 874, 462, .48, DIM)
+        label(frame, f"~{tracked_range*100:.0f} cm" if tracked_range is not None else "--", 874, 498, .73)
+    label(frame, "M  mute / arm     Esc  exit", 33, 689, .48, DIM)
+    if spatial is not None:
+        label(frame, "Estimated laptop geometry", 1001, 689, .46, DIM)
+    return frame
+
+
 def render_nearfield(snapshot, health, view):
     grid = np.ascontiguousarray(snapshot["depth"][::-1], dtype=np.float32)
     filtered = cv2.bilateralFilter(grid, 5, .14, 2)
@@ -279,6 +408,37 @@ def render_nearfield(snapshot, health, view):
 PORTRAIT_Y, PORTRAIT_X = np.mgrid[-1:1:180j, -1:1:320j].astype(np.float32)
 
 
+def draw_portrait(frame, lateral, depth, chest_displacement=0.):
+    scale = np.clip(.57/depth, .65, 1.35)
+    x = (PORTRAIT_X-.42*lateral)/scale
+    y = (PORTRAIT_Y-.04)/scale
+    yaw = .16*lateral
+    chest = np.clip(chest_displacement/.004, -.5, .5)
+
+    def shape(cx, cy, width, height):
+        return np.sqrt(np.maximum(1-((x-cx)/width)**2-((y-cy)/height)**2, 0))
+
+    head = shape(.03*yaw, -.34, .27, .49)
+    jaw = shape(yaw*.12, -.13, .205, .32)
+    shoulders = shape(0, .62, .73*(1+.045*chest), .44)
+    neck = shape(0, .19, .15, .31)
+    surface = np.maximum.reduce((.70*head, .63*jaw, .49*shoulders, .44*neck))
+    face = np.maximum(head, jaw)
+    nose = np.exp(-((x-.37*yaw)/.055)**2-((y+.28)/.14)**2)
+    brows = np.exp(-((abs(x-.19*yaw)-.105)/.085)**2-((y+.48)/.045)**2)
+    cheeks = np.exp(-((abs(x-.19*yaw)-.145)/.093)**2-((y+.22)/.10)**2)
+    mouth = np.exp(-((x-.19*yaw)/.13)**2-((y+.095)/.016)**2)
+    surface += face*(.23*nose+.10*brows+.13*cheeks-.08*mouth)
+    surface = surface.astype(np.float32, copy=False)
+    dx = cv2.Sobel(surface, cv2.CV_32F, 1, 0, ksize=3)
+    dy = cv2.Sobel(surface, cv2.CV_32F, 0, 1, ksize=3)
+    light = np.clip(.78+.28*dx-.24*dy, .48, 1.12)
+    intensity = np.uint8(255*np.clip(surface*light*(1.12-.48*depth), 0, 1))
+    portrait = cv2.applyColorMap(intensity, cv2.COLORMAP_INFERNO)
+    portrait[intensity == 0] = 0
+    np.maximum(frame, cv2.resize(portrait, (WIDTH, HEIGHT)), out=frame)
+
+
 def render_portrait(snapshot, health, view):
     """Shade a generic relief model located by acoustic range and lateral estimates."""
     if view == "debug":
@@ -286,35 +446,7 @@ def render_portrait(snapshot, health, view):
     frame = cv2.convertScaleAbs(render_nearfield(snapshot, health, "pure"), alpha=.28)
     subject = snapshot.get("subject")
     if subject is not None and snapshot["state"] == "sensing":
-        lateral, depth = subject
-        scale = np.clip(.57/depth, .65, 1.35)
-        x = (PORTRAIT_X-.42*lateral)/scale
-        y = (PORTRAIT_Y-.04)/scale
-        yaw = .16*lateral
-        chest = np.clip(snapshot.get("chest_displacement", 0.)/.004, -.5, .5)
-
-        def shape(cx, cy, width, height):
-            return np.sqrt(np.maximum(1-((x-cx)/width)**2-((y-cy)/height)**2, 0))
-
-        head = shape(.03*yaw, -.34, .27, .49)
-        jaw = shape(yaw*.12, -.13, .205, .32)
-        shoulders = shape(0, .62, .73*(1+.045*chest), .44)
-        neck = shape(0, .19, .15, .31)
-        surface = np.maximum.reduce((.70*head, .63*jaw, .49*shoulders, .44*neck))
-        face = np.maximum(head, jaw)
-        nose = np.exp(-((x-.37*yaw)/.055)**2-((y+.28)/.14)**2)
-        brows = np.exp(-((abs(x-.19*yaw)-.105)/.085)**2-((y+.48)/.045)**2)
-        cheeks = np.exp(-((abs(x-.19*yaw)-.145)/.093)**2-((y+.22)/.10)**2)
-        mouth = np.exp(-((x-.19*yaw)/.13)**2-((y+.095)/.016)**2)
-        surface += face*(.23*nose+.10*brows+.13*cheeks-.08*mouth)
-        surface = surface.astype(np.float32, copy=False)
-        dx = cv2.Sobel(surface, cv2.CV_32F, 1, 0, ksize=3)
-        dy = cv2.Sobel(surface, cv2.CV_32F, 0, 1, ksize=3)
-        light = np.clip(.78+.28*dx-.24*dy, .48, 1.12)
-        intensity = np.uint8(255*np.clip(surface*light*(1.12-.48*depth), 0, 1))
-        portrait = cv2.applyColorMap(intensity, cv2.COLORMAP_INFERNO)
-        portrait[intensity == 0] = 0
-        np.maximum(frame, cv2.resize(portrait, (WIDTH, HEIGHT)), out=frame)
+        draw_portrait(frame, *subject, snapshot.get("chest_displacement", 0.))
     events = snapshot["events"]
     age = snapshot["time"]-events[-1].time if events else 10.
     position = snapshot.get("position")

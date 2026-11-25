@@ -26,4 +26,10 @@ For the final six-second Realtek verification, the tuner used 12.0–16.5 kHz ch
 
 The live burst produced only intermittent returns. Peak in-gate SNR was 16.0 dB, gated detections occurred in 1.25% of scored samples, and no stable subject or BPM qualified. Median acoustic foreground coverage was zero. The visible ambient scan passed the display target, while the independent acoustic checks rejected the trial. No live tuning profile qualified for promotion.
 
+## Spatial echo projection
+
+The 6–13.5 kHz stereo multicarrier probe acquired timing on the Realtek device in 0.15 seconds at the default transmit gain and completed room calibration. A guided hand-wave run emitted for 21.17 seconds with zero reported audio faults or dropped blocks. Two calibrated paths picked up a new echo in 5 of 219 snapshots during the left-hand segment and 3 of 216 snapshots during the right-hand segment. The rest had evidence on at most one path. No snapshot met the three-path requirement for the front projection. The range history remains available for those returns.
+
+Simulated microphone samples confirmed that the projection appears when delays agree across multiple paths, moves as the reflector positions change, and clears after loss of timing. These tests exercise the signal processing and dashboard. Positions on the physical laptop remain unverified.
+
 All 40 automated tests passed. A separate DirectShow receiver saw 42 changing frames out of 45 at 1280 × 720. A muted five-second run through the normal `main.py` entry point also opened both Realtek channels, sent 150 frames to OBS, and closed the stream cleanly.

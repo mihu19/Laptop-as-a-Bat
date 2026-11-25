@@ -28,9 +28,9 @@ class MotionEvent:
 
 
 class ChirpProbe:
-    """One windowed chirp per speaker. CW pilots occupy the latter part of its slot."""
+    """Periodic stereo probe and the delay templates used to recover each path."""
 
-    def __init__(self, carriers, settings=None):
+    def __init__(self, carriers, settings=None, multicarrier=False):
         settings = settings or SonarSettings()
         self.wave = np.zeros((PERIOD, 2))
         self.filters = []
@@ -40,23 +40,34 @@ class ChirpProbe:
         frequencies = np.fft.fftfreq(PERIOD, 1/RATE)
         sweep = (settings.low_hz, settings.high_hz)
         for side, ends in enumerate((sweep, sweep[::-1])):
-            chirp = window*signal.chirp(t, ends[0], CHIRP_SAMPLES/RATE, ends[1])
             packet = self.wave[:, side]
             offset = SLOT*side
-            packet[offset:offset+CHIRP_SAMPLES] = chirp
+            if multicarrier:
+                # Adjacent FFT bins go to opposite speakers. Each microphone
+                # can recover both paths from the same recording interval.
+                bins = np.flatnonzero((frequencies >= 6000) & (frequencies <= 13500))[side::2]
+                spectrum = np.zeros(PERIOD//2+1, complex)
+                spectrum[bins] = np.exp(1j*np.pi*np.arange(len(bins))**2/len(bins))
+                packet[:] = np.fft.irfft(spectrum)
+                packet /= abs(packet).max()
+                band = np.isin(np.arange(PERIOD), bins)
+            else:
+                chirp = window*signal.chirp(t, ends[0], CHIRP_SAMPLES/RATE, ends[1])
+                packet[offset:offset+CHIRP_SAMPLES] = chirp
+                band = (frequencies >= sweep[0]-250) & (frequencies <= sweep[1]+250)
+                # Remove the dominant pilot bins from the pulse compressor.
+                for carrier in carriers:
+                    band &= abs(frequencies-carrier) > 110
             template = np.fft.fft(packet)
-            band = (frequencies >= sweep[0]-250) & (frequencies <= sweep[1]+250)
-            # Remove the dominant pilot bins from the pulse compressor.
-            for carrier in carriers:
-                band &= abs(frequencies-carrier) > 110
             filt = template.conj()*band
             point = np.fft.ifft(template*filt)
             self.filters.append(filt/point[0].real)
-            guard = np.arange(CHIRP_SAMPLES+40, SLOT)
-            phase = 2*np.pi*carriers[side]*guard/RATE
-            taper = signal.windows.tukey(len(guard), .55)
-            packet[offset+guard] = .25*taper*np.sin(phase)
-            self.pilot_refs.append((offset+guard, 8*taper*np.exp(-1j*phase)/sum(taper**2)))
+            if not multicarrier:
+                guard = np.arange(CHIRP_SAMPLES+40, SLOT)
+                phase = 2*np.pi*carriers[side]*guard/RATE
+                taper = signal.windows.tukey(len(guard), .55)
+                packet[offset+guard] = .25*taper*np.sin(phase)
+                self.pilot_refs.append((offset+guard, 8*taper*np.exp(-1j*phase)/sum(taper**2)))
         self.filters = np.array(self.filters)
         spectra = np.fft.fft(self.wave, axis=0).T
         delays = np.exp(-2j*np.pi*np.fft.fftfreq(PERIOD)*FRACTIONS[:, None])
@@ -152,12 +163,13 @@ class TorsoRate:
 
 
 class NearField:
-    def __init__(self, channels, carriers, direct_path=.15, settings=None, probe=None):
+    def __init__(self, channels, carriers, direct_path=.15, settings=None, probe=None, spatial=None):
         self.settings = settings or SonarSettings()
         self.probe = probe or ChirpProbe(carriers, self.settings)
         self.channels = channels
         self.carriers = np.asarray(carriers)
         self.direct_path = direct_path
+        self.spatial = spatial
         self.ranges = RANGES
         self.breath = TorsoRate(10 if self.settings.low_band else 30)
         self.events = deque(maxlen=8)
@@ -192,6 +204,8 @@ class NearField:
         self.velocity = 0.
         self.track = deque()
         self.breath.reset()
+        if self.spatial is not None:
+            self.spatial.reset()
 
     def push(self, block):
         offset = block.start % PERIOD
@@ -212,11 +226,14 @@ class NearField:
             self.reference = profiles.copy()
         else:
             self.reference += .50*(profiles-self.reference)
-        if self.ref_index is None:
+        if self.ref_index is None or self.spatial is not None:
             # Some WASAPI devices report ADC/DAC time in whole callback blocks.
             # Search the possible buffer phases for each coded transmission.
             search = (nominal_lag + np.arange(0, PERIOD, 480)[:, None]
                       + np.arange(-72, 150)).ravel() % PERIOD
+            if self.ref_index is not None:
+                tracked = (self.ref_index[:, :, None]+np.arange(len(search)) % 21-10) % PERIOD
+                search = np.where(self.confirmed[:, :, None], tracked, search)
         else:
             search = (self.ref_index[:, :, None] + np.arange(-10, 11)) % PERIOD
         found = np.take_along_axis(abs(self.reference).transpose(0, 2, 1),
@@ -238,6 +255,8 @@ class NearField:
         self.snr = 20*np.log10(np.maximum(snr.max(axis=1), 1e-5))
         self.locked = bool(valid.any())
         if not self.locked:
+            if self.spatial is not None:
+                self.spatial.lost()
             self.subject_age = max(0, self.subject_age-1)
             if not self.subject_age:
                 self.subject = None
@@ -280,6 +299,9 @@ class NearField:
         self.cir = squared.max(axis=(0, 1))
         self.echo_power = float(self.cir[RANGES >= .20].max())
         self.stereo_energy = squared[:, :, RANGES >= .20].sum(axis=(1, 2))
+        if self.spatial is not None:
+            self.spatial.update(measured, valid, self.noise_power, audio, index)
+            return
         clean = self._mti(measured, valid)
         self._scene(measured, clean, valid, t)
         self._diagnostics(clean)

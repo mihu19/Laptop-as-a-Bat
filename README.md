@@ -1,6 +1,6 @@
 # Laptop-as-a-Bat
 
-Bat Cam uses a Windows laptop's speakers and microphone array as a near-field sonar. A lightweight acoustic model estimates presence, gesture and position from qualified echoes. The 1280 × 720 preview and OBS Virtual Camera feed show a generic thermal portrait when tracking qualifies and a labeled ambient scan while acquisition is pending.
+Bat Cam uses a Windows laptop's speakers and microphone array as a near-field sonar. The 1280 × 720 preview and OBS Virtual Camera share one dashboard. It shows measured echoes by distance and time, or an experimental front projection using multiple sound paths.
 
 ## Run
 
@@ -12,13 +12,33 @@ python -m venv .venv
 .\.venv\Scripts\python.exe main.py
 ~~~
 
-The default live mode opens a visible ambient display and measures the room's input-band noise for three seconds with the transmitter muted. It then arms automatically. The 12.0–16.5 kHz probe may be audible. It uses the existing −48 dBFS default peak gain per channel and stops at its configured output limits. Use the following command for a silent preview.
+The default live mode opens the sonar view and measures the room's input-band noise for three seconds with the transmitter muted. It then arms automatically. The 12.0–16.5 kHz probe may be audible. It uses the existing −48 dBFS default peak gain per channel and stops at its configured output limits. Use the following command for a silent preview.
 
 ~~~powershell
 .\.venv\Scripts\python.exe main.py --simulate --no-virtual-cam
 ~~~
 
 The simulator uses generated microphone samples and an acoustic room model. It takes no input from the microphone and leaves the physical speakers silent. Enter `--muted` to open the live microphone and preview with the speakers muted.
+
+### Spatial echo imaging
+
+~~~powershell
+.\.venv\Scripts\python.exe main.py --spatial
+~~~
+
+Start with the area in front of the laptop clear. Press **M** to start the audible 6–13.5 kHz stereo probe and wait for room calibration. Then sit facing the laptop and move a hand about 30–75 cm away. Recalibrate after moving the laptop or changing the lid angle. Add `--simulate` to preview the dashboard with two moving point reflectors and no speaker output.
+
+Each speaker uses different subcarriers so the app can recover four speaker-to-microphone paths from two capture channels. It subtracts the empty-room profile and projects locations where at least three calibrated paths agree. Axis positions use approximate laptop geometry. The projection can show patches of moving reflectors, and its accuracy depends on the laptop, room and echo strength. Full body shape remains unresolved. The dashboard keeps a separate range history for echoes without enough spatial evidence, including mono input.
+
+### OFDM motion tracking
+
+~~~powershell
+.\.venv\Scripts\python.exe main.py --ofdm
+~~~
+
+Clear the area in front of the laptop and press **M** to start the probe. Stand clear until the empty-room measurement finishes, then move toward or away from the laptop in the 25–150 cm range. The measured echoes enter the trail at the right edge and move vertically as the distance changes. The dashboard reports a tracked range after several echo readings agree. Press **M** to mute, then press it again with the area clear to recalibrate. Select **OBS Virtual Camera** in the receiving app.
+
+The OFDM tracker adapts the 6–10 kHz sounder and channel estimation from [Laptop Acoustic Radar](https://github.com/enricguaschmesia-lab/laptop-acoustic-radar/tree/b00695c5472ce705532aaa1cb02bf3a87d2cceba) and applies Bat Cam's existing transmission caps. The probe is audible. Add `--simulate` for a silent demonstration. The dashboard shows chirp-based gesture and breathing readouts when launched without `--ofdm`.
 
 ### Windows audio and OBS
 
@@ -30,21 +50,19 @@ Install the OBS Studio Virtual Camera component. Leave OBS's own virtual-camera 
 
 | Key | Action |
 | --- | --- |
-| **V** | Cycle the near-field view with HUD, gated-return debug view and pure sonar view. |
-| **H** | Hide or restore the HUD and tracking overlays. |
 | **M** or **Space** | Mute or re-arm transmission within the exposure budget. |
 | **R** | Reset the demo timer and resume when exposure budget permits. |
 | **Esc** or **Q** | Mute and close the app. |
 
-The camera mode needs no calibration keys. Gesture detection uses tracks from range-gated echoes. Push approaches the laptop, Pull moves away, and Swipe Left/Right changes relative lateral position.
+The default chirp mode needs no calibration keys. Gesture detection uses tracks from range-gated echoes. Push approaches the laptop, Pull moves away, and Swipe Left/Right changes relative lateral position.
 
 ## What the camera measures
 
 - Each speaker takes a turn transmitting a 512-sample, Tukey-windowed chirp over 12.0–16.5 kHz. Its 13.0 or 15.5 kHz pilot fits in the slot after the chirp. Audio runs at 48 kHz. The model updates from 25 acoustic packets per second, independently of the webcam's 30 FPS frame clock.
-- Stereo matched filtering separates the two chirps. Direct-path estimates and rolling band gains normalize the paths automatically. The room model updates at alpha 0.02. A stationary return can fade as the model learns it. Nearby movement and chest micro-motion refresh the image.
+- Stereo matched filtering separates the two chirps. Direct-path estimates and rolling band gains normalize the paths automatically. The motion detector adapts its room model at alpha 0.02, so a stationary return can fade from its motion estimate.
 - The processor admits taps estimated at 0.15–0.95 m to image, gesture and breathing processing. The delay samples are spaced 3.57 mm apart. With 4.5 kHz of bandwidth, ideal reflector separation is about 3.8 cm. Device geometry, noise and multipath can shift estimated echo ranges. Use `--direct-path-m` to supply a measured speaker-to-mic distance. [Pulse compression and range resolution](https://www.ll.mit.edu/sites/default/files/outreach/doc/2018-07/lecture%205.pdf)
-- Range drives portrait scale and brightness. Stereo contrast moves the model laterally and adds a small apparent turn. Modeled facial features and apparent yaw are illustrative. The debug view shows gated acoustic returns, and detected gestures add a range-positioned ripple to the portrait.
-- Breathing uses a stable high-SNR return in the 0.35–0.85 m zone. It combines complex phase and amplitude with a 0.12–0.55 Hz bandpass and autocorrelation. The estimator primarily uses a 10-second window and retains 20 seconds for slower cycles. The phase-derived displacement scales chest animation when breathing confidence qualifies.
+- The echo trail shows measured strength by distance over time. The profile shows the currently accepted range bins. The strongest echo in the chirp profile can come from a stationary object in the room. The plots clear when the probe is muted or the timing reference drops.
+- Breathing uses a stable high-SNR return in the 0.35–0.85 m zone. It combines complex phase and amplitude with a 0.12–0.55 Hz bandpass and autocorrelation. The estimator primarily uses a 10-second window and retains 20 seconds for slower cycles. The dashboard displays BPM when the estimate qualifies.
 
 ## Acoustic model
 
@@ -54,7 +72,7 @@ The camera mode needs no calibration keys. Gesture detection uses tracks from ra
 
 The first launch also trains automatically if the generated model is absent. The trainer fits a small MLP and a Ridge position model with scikit-learn, then saves the local `models/acoustic_sonar_ml.joblib` artifact. The training set contains simulated range profiles, multipath, signed Doppler estimates, stereo asymmetry and noise. Validation uses independent simulator seeds. The three-second real microphone sample supplies the runtime noise baseline without assigning human labels. Signed Doppler features are estimates from motion of gated range taps.
 
-In live mode, startup and per-second terminal messages show the opened input channels, peak microphone level, gated echo SNR when available, and inference time. An ambient scan is display geometry rather than echo energy. Its visibility is scored separately from the scored acoustic foreground, which must meet the signal and tracking checks before a live setup can qualify.
+In live chirp mode, startup and per-second terminal messages show the opened input channels, peak microphone level, gated echo SNR when available, and inference time.
 
 ## Limits and diagnostics
 
@@ -63,7 +81,8 @@ Peak amplitude is capped at approximately −30 dBFS per channel. The default ro
 | Option | Purpose |
 | --- | --- |
 | `--no-virtual-cam` | Run with the OpenCV preview only. |
-| `--view pure` or `--view debug` | Set the initial view mode. |
+| `--spatial` | Use the experimental stereo echo projection on the same dashboard. |
+| `--ofdm` | Use the OFDM tracker on the same dashboard. |
 | `--muted` | Open the live app without transmitting until you press M. |
 | `--headless --duration S` | Run a timed smoke test without a preview. Physical output is muted by default. |
 | `--headless --transmit --duration S` | Run a bounded acoustic test with real output. |

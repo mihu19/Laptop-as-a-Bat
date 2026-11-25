@@ -7,10 +7,37 @@ from main import Worker
 from ml_acoustic_model import AcousticModel, load_model
 from nearfield import NearField, NearFieldDemo, PERIOD, RANGES
 from sonar_settings import ML_BAND
-from visualizer_cam import render_ml
+from visualizer_cam import render_echo_map, render_ml
 
 
 class AcousticMLTests(unittest.TestCase):
+    def test_sonar_trail_uses_measured_echoes_and_clears_on_mute_or_timing_loss(self):
+        near = NearField(2, ML_BAND.carriers, settings=ML_BAND)
+        model = AcousticModel(load_model())
+        worker = Worker(None, nearfield=near, model=model)
+        worker.active = True
+        health = {"simulated": True}
+        plot = np.s_[192:555, 116:813]
+        empty = render_echo_map(worker.snapshot(), health)[plot].copy()
+
+        model.grid = np.ones_like(near.grid)
+        demo = NearFieldDemo(near.probe)
+        for i in range(25):
+            near.analyze(demo.block(i*PERIOD, PERIOD), 90, (i+1)/25)
+            worker._publish()
+        snapshot = worker.latest
+        active = render_echo_map(snapshot, health)
+        self.assertEqual(active.shape, (720, 1280, 3))
+        self.assertTrue(active.flags.c_contiguous)
+        self.assertGreater(np.count_nonzero(active[plot] != empty), 1000)
+        snapshot["depth"].fill(0)
+        np.testing.assert_array_equal(render_echo_map(snapshot, health), active)
+
+        for unqualified in (dict(state="muted"), dict(depth_locked=False)):
+            with self.subTest(fields=tuple(unqualified)):
+                cleared = render_echo_map(dict(snapshot, **unqualified), health)
+                np.testing.assert_array_equal(cleared[plot], empty)
+
     def test_ambient_display_is_visible_without_fabricating_presence(self):
         cv2.setNumThreads(1)
         near = NearField(2, ML_BAND.carriers, settings=ML_BAND)
