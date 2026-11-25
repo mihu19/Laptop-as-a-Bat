@@ -201,6 +201,78 @@ def render_sonar(snapshot, health, hud=True):
     return frame
 
 
+def render_nearfield(snapshot, health, view):
+    grid = np.ascontiguousarray(snapshot["depth"][::-1])
+    filtered = cv2.bilateralFilter(grid, 5, .14, 2)
+    # Keep the mesh on measured support. Depth controls brightness and perspective.
+    slope = cv2.Sobel(filtered, cv2.CV_32F, 0, 1, ksize=3)
+    brightness = np.clip(filtered + .12*slope, 0, 1)
+    gray = np.uint8(brightness*255)
+    rows, columns = gray.shape
+    src = np.float32([(0, 0), (columns-1, 0), (columns-1, rows-1), (0, rows-1)])
+    canvas = (WIDTH//2, HEIGHT//2)
+    dst = np.float32([(119, 42), (520, 42), (canvas[0]-1, canvas[1]-1), (0, canvas[1]-1)])
+    projection = cv2.getPerspectiveTransform(src, dst)
+    projected = cv2.warpPerspective(gray, projection, canvas, flags=cv2.INTER_CUBIC)
+    frame = cv2.applyColorMap(projected, cv2.COLORMAP_INFERNO)
+    frame[projected == 0] = 0
+    if view == "hud":
+        mask = np.uint8(projected > 70)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        outlines = [c for c in contours if cv2.contourArea(c) > 55]
+        cv2.drawContours(frame, outlines, -1, (115, 130, 204), 1, cv2.LINE_AA)
+        lines = ((np.arange(rows)[:, None] % 8 == 0) | (np.arange(columns) % 7 == 0))
+        mesh = np.uint8(lines & (gray > 81))
+        mesh = cv2.warpPerspective(mesh, projection, canvas, flags=cv2.INTER_NEAREST)
+        selected = mesh > 0
+        frame[selected] = np.minimum(255, frame[selected].astype(np.uint16)+(19, 25, 34))
+        if snapshot["position"] and np.max(gray) > 110:
+            lateral, depth = snapshot["position"]
+            point = np.float32([[[(lateral+1)*(columns-1)/2, (.95-depth)*(rows-1)/.80]]])
+            x, y = np.rint(cv2.perspectiveTransform(point, projection)[0, 0]).astype(int)
+            if 0 <= x < canvas[0] and 0 <= y < canvas[1] and projected[y, x] > 50:
+                cv2.circle(frame, (x, y), 6, TEXT, 1, cv2.LINE_AA)
+    frame = cv2.resize(frame, (WIDTH, HEIGHT), interpolation=cv2.INTER_LINEAR)
+    if view == "pure":
+        return frame
+    if view == "debug":
+        label(frame, "NEAR FIELD   /   GATED RETURN HISTORY", 28, 42, .64)
+        history = snapshot["gated_waterfall"]
+        if history.size:
+            for side in range(2):
+                x = 45+side*635
+                data = np.uint8(np.clip(history[:, side, :]*255/32, 0, 255))
+                strip = cv2.applyColorMap(data, cv2.COLORMAP_INFERNO)
+                frame[285:630, x:x+552] = cv2.resize(strip, (552, 345))
+                trace(frame, snapshot["gated_spectrum"][side], x, 168, 552, 100, 0, 32, MINT)
+                label(frame, "Left" if side == 0 else "Right", x, 147, .56)
+                label(frame, "0.15 m                        0.95 m", x, 655, .48, DIM)
+    else:
+        label(frame, "BAT CAM   /   0.95 m", 28, 42, .64)
+    status = ("Echo tracking" if snapshot["depth_locked"] else "Waiting for a range reference")
+    if snapshot["state"] == "muted":
+        status = "Muted"
+    if health.get("simulated"):
+        status += "   /   synthetic"
+    label(frame, status, 29, 68, .42, DIM)
+    bpm = snapshot["range_bpm"]
+    if bpm is not None:
+        label(frame, f'{bpm:.1f} BPM  {snapshot["range_quality"]:.0%}', 1040, 42, .62, MINT)
+    elif snapshot["range_seconds"] > 0:
+        label(frame, f'Breathing  {snapshot["range_seconds"]:.1f}s', 1040, 42, .46, DIM)
+    wave = snapshot["range_wave"]
+    if len(wave) > 1:
+        scale = max(.01, float(np.percentile(abs(wave), 95)))
+        trace(frame, wave, 1042, 53, 199, 23, -scale, scale, MINT)
+    events = snapshot["events"]
+    if events and snapshot["state"] == "sensing" and snapshot["time"]-events[-1].time < 1.4:
+        label(frame, events[-1].name.upper(), 29, HEIGHT-58, .81, AMBER, 2)
+    label(frame, f'{health["reason"]}   {health["remaining"]:.0f}s available',
+          29, HEIGHT-28, .47, DIM)
+    label(frame, "V  view     H  hide     M  mute     R  reset timer", 849, HEIGHT-28, .47, DIM)
+    return frame
+
+
 class CameraOutput:
     """The UI remains responsive during backend open, pacing and send failures."""
 

@@ -146,6 +146,7 @@ class NearField:
         self.grid = np.zeros((len(RANGES), len(X)), np.float32)
         self.reference = None
         self.ref_index = None
+        self.confirmed = np.zeros((2, self.channels), bool)
         self.clutter = None
         self.torso_activity = None
         self.gain = None
@@ -171,7 +172,8 @@ class NearField:
         self.cursor = (offset+len(block.samples)) % PERIOD
         if self.cursor:
             return
-        delay = round((block.dac_time-block.adc_time)*RATE)
+        timing = (block.dac_time-block.adc_time)*RATE
+        delay = round(timing) if np.isfinite(timing) else 0
         self.analyze(self.samples, delay, (block.start+len(block.samples))/RATE)
 
     def analyze(self, audio, nominal_lag, t):
@@ -195,7 +197,14 @@ class NearField:
         floor = np.median(abs(self.reference), axis=1)
         instantaneous = abs(profiles[np.arange(2)[:, None], index, np.arange(self.channels)])
         snr = peak/(floor+1e-10)
-        valid = (snr >= 5) & (peak > 2e-7) & (instantaneous > .4*peak)
+        coherent = (peak > 2e-7) & (instantaneous > .4*peak)
+        # An acquired direct path may hold at a lower SNR on the same delay.
+        # Acquiring a path from noise still requires the higher threshold.
+        if self.ref_index is not None:
+            displacement = (index-self.ref_index+PERIOD//2) % PERIOD-PERIOD//2
+            self.confirmed &= abs(displacement) <= 3
+        valid = coherent & ((snr >= 5) | (self.confirmed & (snr >= 3.2)))
+        self.confirmed = valid
         self.snr = 20*np.log10(np.maximum(snr.max(axis=1), 1e-5))
         self.locked = bool(valid.any())
         if not self.locked:
@@ -326,7 +335,7 @@ class NearField:
         self.position = None
         if motion:
             _, depth, x, horizontal = max(motion)
-            self.position = (x, depth)
+            self.position = (x, depth) if horizontal else None
             self._gesture(t, depth, x, horizontal)
         elif self.track and t-self.track[-1][0] > .14:
             self.track.clear()

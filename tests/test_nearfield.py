@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from audio_engine import CARRIERS, HOP, MAX_GAIN, Transmitter
-from nearfield import FRAME_RATE, METRES_PER_SAMPLE, PERIOD, RANGES, NearField, NearFieldDemo
+from nearfield import FRAME_RATE, METRES_PER_SAMPLE, PERIOD, RANGES, NearField, NearFieldDemo, TorsoRate
 
 
 class NearFieldTests(unittest.TestCase):
@@ -72,3 +72,19 @@ class NearFieldTests(unittest.TestCase):
         tx.mute()
         self.assertFalse(tx.fill(out, 12*HOP))
         self.assertFalse(out.any())
+
+    def test_breath_lock_requires_enough_cycles(self):
+        for bpm, expected in ((18, (7, 8)), (8, (14, 19))):
+            with self.subTest(bpm=bpm):
+                track = TorsoRate()
+                first = None
+                for i in range(19*FRAME_RATE):
+                    t = i/FRAME_RATE
+                    iq = np.exp(1j*.45*np.sin(2*np.pi*bpm*t/60))
+                    track.push(t, (0, 0, .58), iq)
+                    if track.bpm is not None:
+                        first = t
+                        break
+                self.assertIsNotNone(first)
+                self.assertTrue(expected[0] <= first <= expected[1], first)
+                self.assertAlmostEqual(track.bpm, bpm, delta=1)
