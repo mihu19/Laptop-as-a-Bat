@@ -1,6 +1,6 @@
 # Live sonar tuning results
 
-The Realtek endpoints ran at 48 kHz. Each six-second burst sent about 180 frames to OBS Virtual Camera. PortAudio reported zero stream faults and the capture queue dropped zero blocks. The emitted signal stayed below the existing peak cap.
+The Realtek endpoints ran at 48 kHz. Seven bursts emitted for a combined 41.98 seconds and sent 1,262 frames to OBS Virtual Camera. PortAudio reported zero stream faults and the capture queue dropped zero blocks. The emitted signal stayed below the existing peak cap.
 
 | Trial | Settings changed | Peak in-gate SNR | Result |
 | --- | --- | ---: | --- |
@@ -10,5 +10,6 @@ The Realtek endpoints ran at 48 kHz. Each six-second burst sent about 180 frames
 | Wide burst 1 | 17–22 kHz and gain 0.00956 | 13.3 dB | Median foreground coverage and IoU were zero. |
 | Wide burst 2 | Gain 0.010, alpha 0.0134, noise multiplier 3.7 | 15.0 dB | Timing reference held for 99.3% of samples, but a usable in-gate return appeared in only 6.0%. The peak-coverage frame showed a broad range band. |
 | Stability trial | Wide chirp, gain 0.010, persistence 0.8, Gaussian smoothing 0.8 | 14.1 dB | Median foreground coverage and IoU remained zero. |
+| Final verification with localization check | Repeated stability settings | 20.6 dB | Detectable returns appeared in 1.3% of scored acoustic samples. Peak foreground coverage reached 5.1%, with median coverage and IoU at zero, stereo imbalance of 37.9%, and no BPM reading. |
 
 All trials had zero energy in the post-gate output outside the represented range. None met the median SNR, connected foreground coverage, IoU, stereo balance or breathing checks. Peak SNR describes a momentary return. The wide-band result illustrates why a stable transmit timing reference alone is insufficient for imaging. No settings qualified for promotion.

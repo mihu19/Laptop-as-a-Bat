@@ -64,6 +64,18 @@ Peak amplitude is capped at approximately −30 dBFS per channel. The default ro
 
 ## Verification
 
+Run the live tuner from the project root.
+
+~~~powershell
+.\.venv\Scripts\python.exe scripts/tune_and_verify.py
+~~~
+
+The tuner transmits in six-second bursts and scores the pure sonar frames. It measures in-gate return SNR against the matched-filter residual floor, the largest connected foreground region, consecutive-frame IoU, and left/right echo balance. Missing echoes count against the SNR score and blank frame pairs score zero IoU. A qualifying burst triggers a 20-second breathing check. Bat Cam loads the local `sonar_config.json` automatically when the tuner saves a profile that passes every check.
+
+Each burst saves a CIR plot, radar, final and peak-coverage webcam frames, and JSON under `sonar_debug/`. The tuner uses the existing callback limits and caps test gain at 0.010. The range gate applies to accepted distance estimates. Unresolved physical echoes can be assigned an incorrect distance. Connected-component scores measure acoustic blobs and cannot verify facial anatomy.
+
+[Live tuning results](TUNING.md) record the measured hardware outcomes and the reason no profile was promoted.
+
 ~~~powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 .\.venv\Scripts\python.exe main.py --simulate --headless --duration 13 --no-virtual-cam
