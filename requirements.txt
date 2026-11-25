@@ -1,0 +1,5 @@
+numpy>=1.26,<3
+scipy>=1.13,<2
+sounddevice==0.5.5
+opencv-python>=4.9,<5
+pyvirtualcam>=0.12,<1
