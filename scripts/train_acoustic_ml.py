@@ -13,7 +13,7 @@ from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ml_acoustic_model import (DOPPLER, HAND_X, HAND_Z, ILD, IPD, LABELS,
-                               MODEL_PATH, RANGE, SCHEMA, SNR, VALID, WINDOW, X, Z,
+                               MODEL_PATH, RANGE, SCHEMA, SNR, STATE_FEATURES, VALID, WINDOW, X, Z,
                                extract_acoustic_features)
 
 
@@ -72,10 +72,10 @@ def train(path=MODEL_PATH):
     x = scaler.transform(features)
     test = scaler.transform(validation)
     classifier = MLPClassifier(hidden_layer_sizes=(24,), max_iter=300, random_state=20,
-                               early_stopping=True, n_iter_no_change=16).fit(x, classes)
+                               early_stopping=True, n_iter_no_change=16).fit(x[:, STATE_FEATURES], classes)
     spatial = Ridge(alpha=18).fit(x[classes > 0], xyz[classes > 0])
     error = np.abs(spatial.predict(test[labels > 0])-locations[labels > 0]).mean(axis=0)
-    metrics = dict(synthetic_validation_accuracy=float(classifier.score(test, labels)),
+    metrics = dict(synthetic_validation_accuracy=float(classifier.score(test[:, STATE_FEATURES], labels)),
                    validation_windows=len(labels), x_mae=float(error[0]),
                    z_mae_cm=float(100*error[1]))
     if metrics["synthetic_validation_accuracy"] <= .92:

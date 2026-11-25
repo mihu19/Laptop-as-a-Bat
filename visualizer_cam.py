@@ -1,6 +1,7 @@
 """OpenCV dashboard and an independent latest-frame virtual camera producer."""
 
 from threading import Event, Thread
+from functools import lru_cache
 
 import cv2
 import numpy as np
@@ -202,7 +203,7 @@ def render_sonar(snapshot, health, hud=True):
 
 
 def render_nearfield(snapshot, health, view):
-    grid = np.ascontiguousarray(snapshot["depth"][::-1])
+    grid = np.ascontiguousarray(snapshot["depth"][::-1], dtype=np.float32)
     filtered = cv2.bilateralFilter(grid, 5, .14, 2)
     if snapshot.get("smoothing"):
         filtered = cv2.GaussianBlur(filtered, (0, 0), snapshot["smoothing"])
@@ -337,6 +338,63 @@ def render_portrait(snapshot, health, view):
         label(frame, events[-1].name.upper(), 29, HEIGHT-58, .79, AMBER, 2)
     label(frame, f'{health["reason"]}   {health["remaining"]:.0f}s available', 29, HEIGHT-28, .47, DIM)
     label(frame, "V  view     H  hide     M  mute     R  reset timer", 849, HEIGHT-28, .47, DIM)
+    return frame
+
+
+@lru_cache(maxsize=1)
+def ambient_scan():
+    """A display reference pattern, independent of microphone evidence."""
+    r = np.sqrt((PORTRAIT_X/.82)**2+((PORTRAIT_Y+.06)/.70)**2)
+    scan = np.uint8(np.clip(65+36*(1-r)+8*np.cos(r*43), 0, 255))
+    small = cv2.applyColorMap(scan, cv2.COLORMAP_TURBO)
+    small[r>1] = 0
+    return cv2.resize(small, (WIDTH, HEIGHT))
+
+
+def render_ml(snapshot, health, view, portrait=None):
+    if view == "debug":
+        frame = render_nearfield(snapshot, health, view)
+    else:
+        if portrait is None or (snapshot.get("display_subject") and snapshot.get("subject") is None):
+            model = render_portrait(dict(snapshot, subject=snapshot.get("display_subject")),
+                                    health, "pure")
+        else:
+            model = portrait
+        opacity = snapshot.get("opacity", 0.)
+        if opacity < 1 and snapshot.get("display_subject"):
+            model = cv2.convertScaleAbs(model, alpha=opacity)
+        background = (cv2.convertScaleAbs(ambient_scan(), alpha=1-.66*opacity)
+                      if opacity > 0 else ambient_scan())
+        frame = cv2.max(background, model)
+        position = snapshot.get("position")
+        state = snapshot["ml_state"]
+        if position and state.startswith("Hand_"):
+            x, depth = position
+            point = (round(WIDTH*(.5+.37*x)), round(HEIGHT*(1-(depth-.15)/.8)))
+            direction = {"Hand_Push": (0, 45), "Hand_Pull": (0, -45),
+                         "Hand_Swipe_Left": (-65, 0), "Hand_Swipe_Right": (65, 0)}[state]
+            start = (point[0]-direction[0], point[1]-direction[1])
+            cv2.line(frame, start, point, (70, 154, 249), 8, cv2.LINE_AA)
+            cv2.circle(frame, point, 13, (200, 245, 255), -1, cv2.LINE_AA)
+        if view == "pure":
+            return frame
+    subject = snapshot.get("subject")
+    status = snapshot["ml_state"].replace("_", " ") if subject else "Waiting for a qualified echo"
+    label(frame, "BAT CAM   /   ACOUSTIC MODEL", 29, 41, .58)
+    label(frame, status, 29, 68, .47, MINT if subject else DIM)
+    label(frame, "MODELED PORTRAIT" if subject else "AMBIENT DISPLAY", 29, 91, .39, DIM)
+    if health.get("simulated"):
+        label(frame, "SYNTHETIC", 29, 115, .42, AMBER)
+    if subject:
+        label(frame, f'Z {subject[1]*100:.0f} cm   {snapshot["confidence"]:.0%}', 1010, 41, .54)
+    if snapshot["range_bpm"] is not None:
+        label(frame, f'{snapshot["range_bpm"]:.1f} BPM', 1090, 70, .55, MINT)
+    signal_wave = snapshot["echo_wave"]
+    span = max(.0004, float(np.percentile(abs(signal_wave), 92)))
+    trace(frame, signal_wave, 1000, 635, 244, 30, -span, span, MINT)
+    label(frame, f'Mic {snapshot["mic_dbfs"]:.0f} dBFS', 1000, 690, .45, DIM)
+    label(frame, f'{health["reason"]}    V view   H hide   M mute   R reset timer',
+          29, 690, .45, DIM)
     return frame
 
 

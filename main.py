@@ -16,10 +16,11 @@ import sounddevice as sd
 
 from audio_engine import AudioEngine, Block, CARRIERS, DEFAULT_GAIN, HOP, MAX_GAIN, RATE, validate_carriers
 from dsp_processor import DSPProcessor
-from nearfield import NearField, NearFieldDemo
+from nearfield import NearField, NearFieldDemo, RANGES
+from ml_acoustic_model import AcousticModel, load_model
 from sonar_imaging import RangeCamera, demo_echo
 from sonar_settings import load_settings
-from visualizer_cam import CameraOutput, FPS, HEIGHT, WIDTH, render, render_nearfield, render_portrait, render_sonar
+from visualizer_cam import CameraOutput, FPS, HEIGHT, WIDTH, render, render_ml, render_nearfield, render_portrait, render_sonar
 
 
 def wav_input(path):
@@ -71,13 +72,17 @@ def demo_block(start, calibration, quiet, carriers):
 
 class Worker:
     def __init__(self, dsp, engine=None, recording=None, range_cam=None, nearfield=None,
-                 diagnostics=False):
+                 diagnostics=False, model=None):
         self.dsp = dsp
         self.engine = engine
         self.recording = recording
         self.range_cam = range_cam
         self.nearfield = nearfield
         self.diagnostics = diagnostics
+        self.model = model
+        self.mic_wave = np.zeros(96)
+        self.mic_peak = 0.
+        self.ambient_floor = None
         self.demo = (NearFieldDemo(nearfield.probe, nearfield.direct_path)
                      if nearfield is not None and engine is None and recording is None else None)
         self.range_start = None
@@ -115,6 +120,17 @@ class Worker:
                         smoothing=near.settings.smoothing, velocity=near.velocity,
                         subject=near.subject if near.subject_age >= 4 else None,
                         chest_displacement=displacement)
+            if self.model is not None:
+                ml = self.model
+                snapshot.update(subject=tuple(ml.subject) if ml.subject is not None else None,
+                                ml_state=ml.label, confidence=ml.confidence,
+                                display_subject=ml.display_subject, opacity=ml.opacity,
+                                ml_ms=ml.latency_ms, echo_wave=self.mic_wave.copy(),
+                                mic_dbfs=float(20*np.log10(max(1e-8, self.mic_peak))),
+                                echo_snr_db=(float(10*np.log10(near.echo_power/near.noise_power))
+                                             if near.noise_power > 0 and near.echo_power > 0 else None))
+                if ml.grid is not None:
+                    snapshot["depth"] = ml.grid.copy()
             if self.diagnostics:
                 snapshot["tuning"] = dict(time=snapshot["time"], locked=near.locked,
                                           echo=near.echo_power, noise=near.noise_power,
@@ -214,15 +230,30 @@ class Worker:
     def _near(self, block):
         near = self.nearfield
         active = block.active and not block.gap
+        if self.model is not None:
+            self.mic_wave = block.samples[::5, 0].copy()
+            self.mic_peak = max(.96*self.mic_peak, float(np.max(abs(block.samples))))
+            band = np.fft.rfft(block.samples, axis=0)[120:166]
+            level = float(np.sqrt(np.mean(abs(band)**2)))
+            if not active and self.first_emit is None and not block.gap:
+                self.ambient_floor = (level if self.ambient_floor is None
+                                      else .97*self.ambient_floor+.03*level)
         if block.gap or (self.expected is not None and self.expected != block.start) or (
                 not active and self.active):
             near.reset()
+            if self.model is not None:
+                self.model.clear()
         self.expected = block.start+HOP
         self.active = active
         if active:
             if self.first_emit is None:
                 self.first_emit = block.start/RATE
             near.push(block)
+            if self.model is not None and self.nearfield.cursor == 0 and (block.start+HOP) % len(near.samples) == 0:
+                if self.ambient_floor is not None and level < 1.1*self.ambient_floor:
+                    self.model.update(np.zeros(28), np.zeros_like(near.grid))
+                else:
+                    self.model.observe(near, RANGES)
             self.max_peak = max(self.max_peak, float(near.grid.max()))
             if self.first_lock is None and near.first_lock is not None:
                 self.first_lock = round(near.first_lock-self.first_emit, 3)
@@ -251,6 +282,7 @@ def run(args):
     recording = wav_input(args.replay) if args.replay else None
     near_enabled = not args.doppler_only and (recording is None or args.nearfield_replay)
     default_carriers = settings.carriers if near_enabled else CARRIERS
+    model = AcousticModel(load_model()) if near_enabled and settings.ml_band else None
     carriers = validate_carriers((default_carriers[0] if args.left_freq is None else args.left_freq,
                                   default_carriers[1] if args.right_freq is None else args.right_freq))
     if recording is None and not args.simulate:
@@ -276,20 +308,26 @@ def run(args):
         near = NearField(channels, carriers, args.direct_path_m, settings, probe) if near_enabled else None
         has_legacy_probe = recording is not None and args.ranging_replay and not near_enabled
         range_cam = RangeCamera(channels, carriers, direct_path=args.direct_path_m) if has_legacy_probe else None
-        worker = stack.enter_context(Worker(dsp, engine, recording, range_cam, near))
+        worker = stack.enter_context(Worker(dsp, engine, recording, range_cam, near, model=model))
         cam = stack.enter_context(CameraOutput(not args.no_virtual_cam))
         if not args.headless:
             cv2.namedWindow("Bat Cam", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("Bat Cam", WIDTH, HEIGHT)
             stack.callback(cv2.destroyAllWindows)
+        auto_arm = False
         if engine is not None:
             stack.callback(engine.tx.mute)
             if near_enabled and not args.muted and (not args.headless or args.transmit):
-                engine.tx.arm()
+                if model is None:
+                    engine.tx.arm()
+                else:
+                    auto_arm = True
         begin = deadline = monotonic()
         view = args.view or ("hud" if range_cam is not None or near_enabled else "debug")
         last_audio = begin
         previous_blocks = 0
+        next_diagnostic = begin
+        peak_inference = 0.
         while True:
             now = monotonic()
             if worker.error is not None:
@@ -302,6 +340,17 @@ def run(args):
                     raise RuntimeError("Audio stream stopped delivering callbacks.")
             snap = worker.latest
             tx = engine.tx if engine else None
+            if auto_arm and now-begin >= 3:
+                auto_arm = False
+                tx.arm()
+            if model is not None:
+                peak_inference = max(peak_inference, snap["ml_ms"])
+                if tx and now >= next_diagnostic:
+                    snr = snap["echo_snr_db"]
+                    echo = f"{snr:.1f} dB" if snr is not None else "unavailable"
+                    print(f'Peak Mic {snap["mic_dbfs"]:.1f} dBFS | Echo SNR {echo} | '
+                          f'Input Channels {channels} | ML {snap["ml_ms"]:.2f} ms', flush=True)
+                    next_diagnostic += 1
             health = dict(source=source, camera=cam.status, peak=tx.peak if tx else 0,
                           used=tx.used/RATE if tx else 0, budget=tx.session/RATE if tx else 120,
                           remaining=(tx.session-tx.used)/RATE if tx else 120,
@@ -309,7 +358,9 @@ def run(args):
                           xruns=engine.xruns if engine else 0,
                           drops=engine.ring.drops if engine else 0,
                           simulated=args.simulate)
-            if near_enabled:
+            if model is not None:
+                frame = render_ml(snap, health, view)
+            elif near_enabled:
                 frame = (render_portrait(snap, health, view) if settings.low_band
                          else render_nearfield(snap, health, view))
             elif view == "debug":
@@ -332,7 +383,8 @@ def run(args):
                     break
                 key = key | 32
                 if tx and key in (32, ord("m")):
-                    if tx.armed or tx.resume_at is not None:
+                    if auto_arm or tx.armed or tx.resume_at is not None:
+                        auto_arm = False
                         tx.mute("muted")
                     elif snap["ready"]:
                         tx.arm()
@@ -370,6 +422,8 @@ def run(args):
                           gestures=[e.name for e in final_snapshot["events"]],
                           bpm=final_snapshot.get("range_bpm", final_snapshot["bpm"]),
                           path_snr_db=np.round(final_snapshot["snr"], 1).tolist(),
+                          peak_ml_ms=peak_inference if model else None,
+                          ml_state=final_snapshot.get("ml_state"),
                           range_locked=final_snapshot.get("depth_locked", False),
                           first_lock_seconds=worker.first_lock,
                           range_peak=worker.max_peak if near_enabled else (

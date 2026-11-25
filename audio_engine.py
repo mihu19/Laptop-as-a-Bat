@@ -19,8 +19,8 @@ DEFAULT_GAIN = 10 ** (-48 / 20)
 
 def validate_carriers(pair):
     left, right = pair
-    if not (14_500 <= left < right <= 22_000 and right - left >= 1_000):
-        raise ValueError("Choose two carriers in 14500..22000 Hz, at least 1000 Hz apart.")
+    if not (12_000 <= left < right <= 22_000 and right - left >= 1_000):
+        raise ValueError("Choose two carriers in 12000..22000 Hz, at least 1000 Hz apart.")
     return float(left), float(right)
 
 

@@ -9,11 +9,12 @@ import numpy as np
 MODEL_PATH = Path(__file__).with_name("models") / "acoustic_sonar_ml.joblib"
 LABELS = ("No_Human", "Human_Present_Idle", "Hand_Push", "Hand_Pull",
           "Hand_Swipe_Left", "Hand_Swipe_Right")
-SCHEMA = 1
+SCHEMA = 2
 WINDOW = 10
 RANGE = slice(0, 16)
 DOPPLER = slice(16, 20)
 ILD, IPD, X, Z, HAND_X, HAND_Z, SNR, VALID = range(20, 28)
+STATE_FEATURES = np.r_[16:20, 25:27, 29:31]
 
 
 def extract_acoustic_features(cube):
@@ -23,12 +24,13 @@ def extract_acoustic_features(cube):
     energy = power.sum(axis=1)
     range_centers = np.linspace(.175, .925, 16)
     centroid = (power @ range_centers)/(energy+1e-12)
-    early, late = history[:3].mean(axis=0), history[-3:].mean(axis=0)
+    late = history[-3:].mean(axis=0)
     signed = np.mean(history[:, DOPPLER], axis=0)
+    motion = np.median(np.diff(history[:, HAND_X:HAND_Z+1], axis=0), axis=0)*7
     return np.r_[np.log1p(24*power.mean(axis=0)), signed,
                  history[:, ILD].mean(), np.sin(history[:, IPD]).mean(),
                  np.cos(history[:, IPD]).mean(), late[X], late[Z],
-                 late[HAND_X]-early[HAND_X], late[HAND_Z]-early[HAND_Z],
+                 motion,
                  (energy[-3:].mean()-energy[:3].mean())/(.02+energy.mean()),
                  centroid[-3:].mean()-centroid[:3].mean(),
                  np.mean(history[:, SNR])/30, np.mean(history[:, VALID])]
@@ -41,7 +43,7 @@ def load_model():
         data = joblib.load(MODEL_PATH)
     except FileNotFoundError:
         data = None
-    if data is None or data.get("schema") != SCHEMA:
+    if not isinstance(data, dict) or data.get("schema") != SCHEMA:
         from scripts.train_acoustic_ml import train
         data, _ = train()
     return data
@@ -61,7 +63,8 @@ class AcousticModel:
         self.label = LABELS[0]
         self.confidence = 1.
         self.latency_ms = 0.
-        self.ambient = 0.
+        self.display_subject = None
+        self.opacity = 0.
 
     def update(self, row, grid):
         start = perf_counter()
@@ -70,7 +73,7 @@ class AcousticModel:
         if active.size:
             p = np.percentile(active, (5, 98))
             self.bounds = p if self.bounds is None else .85*self.bounds+.15*p
-            normalized = np.clip((grid-self.bounds[0])/max(.04, np.ptp(self.bounds)), 0, 1)
+            normalized = np.clip((grid-self.bounds[0])/max(.04, np.ptp(self.bounds)), 0, 1).astype(np.float32)
         else:
             normalized = np.zeros_like(grid)
         self.grid = normalized if self.grid is None else .75*self.grid+.25*normalized
@@ -78,13 +81,13 @@ class AcousticModel:
             features = extract_acoustic_features(self.history)
             w = self.weights
             z = (features-w["mean"])/w["scale"]
-            hidden = np.maximum(z @ w["layers"][0] + w["biases"][0], 0)
+            hidden = np.maximum(z[STATE_FEATURES] @ w["layers"][0] + w["biases"][0], 0)
             logits = hidden @ w["layers"][1] + w["biases"][1]
             scores = np.exp(logits-logits.max())
             scores /= scores.sum()
             index = int(scores.argmax())
             # Geometry and detection evidence stay independent of the learned prior.
-            usable = features[-1] >= .6 and row[VALID] > 0 and row[Z] >= .15
+            usable = features[-1] >= .6 and row[VALID] > 0 and .15 <= row[Z] <= .95
             if usable and index and scores[index] >= .50:
                 estimated = w["spatial"] @ z + w["offset"]
                 target = .65*np.array([row[X], row[Z]])+.35*estimated
@@ -94,6 +97,13 @@ class AcousticModel:
             else:
                 self.subject = None
                 self.label, self.confidence = LABELS[0], float(scores[0])
+        if self.subject is not None:
+            self.display_subject = tuple(self.subject)
+            self.opacity = min(1., self.opacity + .25)
+        else:
+            self.opacity = max(0., self.opacity - .25)
+            if self.opacity == 0:
+                self.display_subject = None
         self.latency_ms = (perf_counter()-start)*1000
 
     def observe(self, near, ranges):
@@ -114,7 +124,6 @@ class AcousticModel:
             if near.position:
                 # Range-gated path rates provide signed Doppler estimates.
                 v = np.clip(near.velocity, -1.35, 1.35)
-                shift = np.asarray(near.carriers)*2*v/343
-                row[DOPPLER] = np.maximum(np.ravel(np.column_stack((-shift, shift))), 0)*343/(
-                    2*np.repeat(near.carriers, 2))
+                balance = np.repeat([1-.5*row[HAND_X], 1+.5*row[HAND_X]], 2)
+                row[DOPPLER] = np.tile([max(-v, 0), max(v, 0)], 2)*balance
         self.update(row, near.grid)

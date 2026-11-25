@@ -6,7 +6,7 @@ import numpy as np
 
 from nearfield import RANGES
 from scripts.tune_and_verify import assess, foreground, tune
-from sonar_settings import LOW_BAND, SonarSettings, load_settings, save_settings
+from sonar_settings import ML_BAND, SonarSettings, load_settings, save_settings
 
 
 class TuningTests(unittest.TestCase):
@@ -32,7 +32,7 @@ class TuningTests(unittest.TestCase):
     def test_configuration_round_trip_and_peak_validation(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root)/"sonar_config.json"
-            self.assertEqual(load_settings(path), LOW_BAND)
+            self.assertEqual(load_settings(path), ML_BAND)
             settings = SonarSettings(gain=.007, persistence=.8, low_hz=17000, high_hz=22000)
             save_settings(settings, path)
             self.assertEqual(load_settings(path), settings)

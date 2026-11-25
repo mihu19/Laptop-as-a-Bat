@@ -21,7 +21,7 @@ class SonarSettings:
     def __post_init__(self):
         if not (0 < self.gain <= 10**(-30/20)
                 and 0.004 <= self.alpha <= .05
-                and 14500 <= self.low_hz < self.high_hz <= 22000
+                and 12000 <= self.low_hz < self.high_hz <= 22000
                 and self.high_hz-self.low_hz >= 3000
                 and 3 <= self.noise_multiplier <= 6
                 and .15 <= self.blanking_m <= .18
@@ -35,17 +35,24 @@ class SonarSettings:
 
     @property
     def carriers(self):
+        if self.ml_band:
+            return (13000., 15500.)
         return (14800., 16800.) if self.low_band else (18500., 20500.)
+
+    @property
+    def ml_band(self):
+        return self.low_hz < 14000
 
 
 LOW_BAND = SonarSettings(low_hz=14500, high_hz=17500)
+ML_BAND = SonarSettings(low_hz=12000, high_hz=16500)
 
 
 def load_settings(path=CONFIG_PATH):
     try:
         return SonarSettings(**json.loads(path.read_text(encoding="utf-8")))
     except FileNotFoundError:
-        return LOW_BAND
+        return ML_BAND
     except (ValueError, TypeError) as error:
         raise ValueError(f"Invalid sonar configuration in {path}: {error}") from error
 

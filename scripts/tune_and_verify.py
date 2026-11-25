@@ -13,15 +13,16 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from audio_engine import AudioEngine, MAX_GAIN, RATE
 from main import Worker
+from ml_acoustic_model import AcousticModel, load_model
 from nearfield import FAR, RANGES, NearField
 from sonar_settings import load_settings, save_settings
-from visualizer_cam import CameraOutput, render_nearfield, render_portrait
+from visualizer_cam import CameraOutput, render_ml, render_nearfield, render_portrait
 
 MAX_TEST_GAIN = min(.010, MAX_GAIN)
 
 
 def foreground(frame):
-    mask = np.uint8(frame.max(axis=2) >= 35)
+    mask = np.uint8(np.maximum(frame[:, :, 0], np.maximum(frame[:, :, 1], frame[:, :, 2])) >= 35)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if count == 1:
         return mask != 0, None
@@ -70,12 +71,18 @@ def capture(settings, seconds, folder, camera_enabled):
     best_coverage = 0.
     folder.mkdir(parents=True, exist_ok=True)
     health = dict(reason="diagnostic", remaining=seconds, simulated=False)
+    ml = AcousticModel(load_model()) if settings.ml_band else None
     with AudioEngine(carriers=settings.carriers, gain=settings.gain, imaging="chirp", max_seconds=seconds,
                      settings=settings) as engine:
         near = NearField(engine.channels, settings.carriers, settings=settings, probe=engine.tx.probe)
-        with Worker(None, engine, nearfield=near, diagnostics=True) as worker, CameraOutput(camera_enabled) as camera:
+        with Worker(None, engine, nearfield=near, diagnostics=True, model=ml) as worker, CameraOutput(camera_enabled) as camera:
+            if ml:
+                sleep(3)
             engine.tx.arm()
             start = deadline = monotonic()
+            next_diagnostic = start
+            ml_peak = 0.
+            rendered = 0
             while monotonic()-start < seconds:
                 engine.tx.heartbeat = monotonic()
                 if worker.error is not None:
@@ -83,7 +90,17 @@ def capture(settings, seconds, folder, camera_enabled):
                 snap = worker.latest
                 draw = render_portrait if settings.low_band else render_nearfield
                 frame = draw(snap, health, "pure")
-                camera.latest = frame
+                display = render_ml(snap, health, "hud", portrait=frame) if ml else frame
+                camera.latest = display
+                rendered += 1
+                if ml:
+                    ml_peak = max(ml_peak, snap["ml_ms"])
+                    if monotonic() >= next_diagnostic:
+                        snr = snap["echo_snr_db"]
+                        snr_text = f"{snr:.1f} dB" if snr is not None else "unavailable"
+                        print(f'Peak Mic {snap["mic_dbfs"]:.1f} dBFS | Echo SNR {snr_text} | '
+                              f'Input Channels {engine.channels} | {snap["ml_state"]}', flush=True)
+                        next_diagnostic += 1
                 if monotonic()-start >= .5:
                     mask, bounds = foreground(frame)
                     fraction = float(mask.mean())
@@ -106,6 +123,13 @@ def capture(settings, seconds, folder, camera_enabled):
     if not samples:
         raise RuntimeError("Diagnostic did not receive microphone frames.")
     report = assess(samples, coverage, ious, widths, settings.low_band)
+    gray = cv2.cvtColor(display, cv2.COLOR_BGR2GRAY)
+    report.update(display_coverage=float(np.mean(display.max(axis=2) >= 35)),
+                  display_mean_brightness=float(gray.mean()), peak_ml_ms=ml_peak,
+                  render_fps=round(rendered/seconds, 2))
+    if ml:
+        report["checks"]["display"] = (.15 <= report["display_coverage"] <= .65
+                                       and report["display_mean_brightness"] > 30)
     report.update(settings=asdict(settings), duration=seconds, output_seconds=output_seconds,
                   xruns=faults, drops=drops, camera_frames=camera.frames, camera_error=camera.error,
                   camera=camera.status, frames_scored=len(coverage), face_verified=False,
@@ -124,7 +148,7 @@ def capture(settings, seconds, folder, camera_enabled):
     radar = cv2.applyColorMap(np.uint8(np.clip(best["grid"][::-1], 0, 1)*255),
                              cv2.COLORMAP_INFERNO)
     for name, image in (("debug_cir.png", chart), ("debug_radar.png", radar),
-                        ("debug_output_cam.png", frame),
+                        ("debug_output_cam.png", display),
                         ("debug_best_cam.png", best_image if best_image is not None else frame)):
         if not cv2.imwrite(str(folder / name), image):
             raise OSError(f"Could not write {name}")
