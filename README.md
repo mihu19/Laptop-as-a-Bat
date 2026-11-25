@@ -1,6 +1,6 @@
 # Laptop-as-a-Bat
 
-Bat Cam uses a Windows laptop's speakers and microphone array as a near-field sonar. It auto-arms at launch and uses qualified echo range and lateral estimates to place a generic, shaded face and upper-body model in a 1280 × 720 OpenCV and OBS Virtual Camera feed at a target of 30 FPS.
+Bat Cam uses a Windows laptop's speakers and microphone array as a near-field sonar. A lightweight acoustic model estimates presence, gesture and position from qualified echoes. The 1280 × 720 preview and OBS Virtual Camera feed show a generic thermal portrait when tracking qualifies and a labeled ambient scan while acquisition is pending.
 
 ## Run
 
@@ -12,7 +12,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe main.py
 ~~~
 
-The live app starts transmitting as soon as the audio stream and preview are ready. The 14.5–17.5 kHz probe may be audible. It uses the existing −48 dBFS default peak gain per channel and shuts down at its configured output limits. Use the following command for a silent preview.
+The default live mode opens a visible ambient display and measures the room's input-band noise for three seconds with the transmitter muted. It then arms automatically. The 12.0–16.5 kHz probe may be audible. It uses the existing −48 dBFS default peak gain per channel and stops at its configured output limits. Use the following command for a silent preview.
 
 ~~~powershell
 .\.venv\Scripts\python.exe main.py --simulate --no-virtual-cam
@@ -40,11 +40,21 @@ The camera mode needs no calibration keys. Gesture detection uses tracks from ra
 
 ## What the camera measures
 
-- Each speaker takes a turn transmitting a 512-sample, Tukey-windowed chirp over 14.5–17.5 kHz. Its 14.8 or 16.8 kHz pilot fits in the slot after the chirp. Audio runs at 48 kHz. A range update is computed up to 25 times a second, independently of the webcam's 30 FPS frame clock.
+- Each speaker takes a turn transmitting a 512-sample, Tukey-windowed chirp over 12.0–16.5 kHz. Its 13.0 or 15.5 kHz pilot fits in the slot after the chirp. Audio runs at 48 kHz. The model updates from 25 acoustic packets per second, independently of the webcam's 30 FPS frame clock.
 - Stereo matched filtering separates the two chirps. Direct-path estimates and rolling band gains normalize the paths automatically. The room model updates at alpha 0.02. A stationary return can fade as the model learns it. Nearby movement and chest micro-motion refresh the image.
-- The processor admits taps estimated at 0.15–0.95 m to image, gesture and breathing processing. The delay samples are spaced 3.57 mm apart. With 3 kHz of bandwidth, ideal reflector separation is about 5.7 cm. Device geometry, noise and multipath can shift estimated echo ranges. Use `--direct-path-m` to supply a measured speaker-to-mic distance. [Pulse compression and range resolution](https://www.ll.mit.edu/sites/default/files/outreach/doc/2018-07/lecture%205.pdf)
+- The processor admits taps estimated at 0.15–0.95 m to image, gesture and breathing processing. The delay samples are spaced 3.57 mm apart. With 4.5 kHz of bandwidth, ideal reflector separation is about 3.8 cm. Device geometry, noise and multipath can shift estimated echo ranges. Use `--direct-path-m` to supply a measured speaker-to-mic distance. [Pulse compression and range resolution](https://www.ll.mit.edu/sites/default/files/outreach/doc/2018-07/lecture%205.pdf)
 - Range drives portrait scale and brightness. Stereo contrast moves the model laterally and adds a small apparent turn. Modeled facial features and apparent yaw are illustrative. The debug view shows gated acoustic returns, and detected gestures add a range-positioned ripple to the portrait.
 - Breathing uses a stable high-SNR return in the 0.35–0.85 m zone. It combines complex phase and amplitude with a 0.12–0.55 Hz bandpass and autocorrelation. The estimator primarily uses a 10-second window and retains 20 seconds for slower cycles. The phase-derived displacement scales chest animation when breathing confidence qualifies.
+
+## Acoustic model
+
+~~~powershell
+.\.venv\Scripts\python.exe scripts/train_acoustic_ml.py
+~~~
+
+The first launch also trains automatically if the generated model is absent. The trainer fits a small MLP and a Ridge position model with scikit-learn, then saves the local `models/acoustic_sonar_ml.joblib` artifact. The training set contains simulated range profiles, multipath, signed Doppler estimates, stereo asymmetry and noise. Validation uses independent simulator seeds. The three-second real microphone sample supplies the runtime noise baseline without assigning human labels. Signed Doppler features are estimates from motion of gated range taps.
+
+In live mode, startup and per-second terminal messages show the opened input channels, peak microphone level, gated echo SNR when available, and inference time. An ambient scan is display geometry rather than echo energy. Its visibility is scored separately from the scored acoustic foreground, which must meet the signal and tracking checks before a live setup can qualify.
 
 ## Limits and diagnostics
 

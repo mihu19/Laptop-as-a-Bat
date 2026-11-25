@@ -17,3 +17,13 @@ All trials had zero energy in the post-gate output outside the represented range
 ## Low-band portrait trials
 
 Two six-second Realtek captures used a 14.5–17.5 kHz sweep and 14.8/16.8 kHz positioning pilots. At gain 0.00398 the tuner found no usable in-gate echoes. At gain 0.010 the probe timing reference held throughout, but a usable return appeared in 23.6% of scored samples and came from only one speaker path. Peak SNR was 17.9 dB. Median coverage and IoU were zero, BPM was unavailable, and neither trial qualified for promotion. OBS received 361 frames across the two trials with zero reported audio faults or dropped blocks.
+
+## Phase 7 acoustic model and display
+
+The final MLP achieved 98.33% accuracy on 720 simulated validation windows. The Ridge model's mean absolute errors on the same simulated subjects were 0.0345 on the normalized lateral axis and 1.39 cm in depth. Controlled microphone PCM replay exercised all four learned gesture classes. These figures characterize the simulator and replay fixture.
+
+For the final six-second Realtek verification, the tuner used 12.0–16.5 kHz chirps, 13.0/15.5 kHz pilots, and a capped gain of 0.010 after a three-second muted ambient measurement. OBS received 180 frames. The renderer produced 29.83 FPS, peak model update time was 0.84 ms, and there were no reported audio faults or dropped blocks. The labeled ambient display covered 45.7% of the frame and had mean grayscale brightness of 71.1 on the 0–255 scale.
+
+The live burst produced only intermittent returns. Peak in-gate SNR was 16.0 dB, gated detections occurred in 1.25% of scored samples, and no stable subject or BPM qualified. Median acoustic foreground coverage was zero. The visible ambient scan passed the display target, while the independent acoustic checks rejected the trial. No live tuning profile qualified for promotion.
+
+All 40 automated tests passed. A separate DirectShow receiver saw 42 changing frames out of 45 at 1280 × 720. A muted five-second run through the normal `main.py` entry point also opened both Realtek channels, sent 150 frames to OBS, and closed the stream cleanly.
