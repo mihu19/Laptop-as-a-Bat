@@ -189,7 +189,12 @@ def run(args):
             if not args.headless:
                 cv2.imshow("Bat Cam", frame)
                 key = cv2.waitKey(1) & 255
-                if key in (27, ord("q")) or cv2.getWindowProperty("Bat Cam", cv2.WND_PROP_VISIBLE) < 1:
+                try:
+                    visible = cv2.getWindowProperty("Bat Cam", cv2.WND_PROP_VISIBLE) >= 1
+                except cv2.error:
+                    # Win32 may already have destroyed the native window on X.
+                    visible = False
+                if key in (27, ord("q"), ord("Q")) or not visible:
                     if tx:
                         tx.mute()
                     break

@@ -9,6 +9,7 @@ from time import monotonic, sleep
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import cv2
 import numpy as np
 from scipy.io import wavfile
 
@@ -139,13 +140,14 @@ class OutputTests(unittest.TestCase):
             for fn in ("namedWindow", "resizeWindow", "destroyAllWindows"):
                 stack.enter_context(patch("main.cv2."+fn))
             stack.enter_context(patch("main.cv2.waitKey", return_value=-1))
-            stack.enter_context(patch("main.cv2.getWindowProperty", return_value=1))
+            stack.enter_context(patch("main.cv2.getWindowProperty",
+                                      side_effect=[1, 1, cv2.error("window closed")]))
             seen = []
             stack.enter_context(patch("main.cv2.imshow", side_effect=lambda name, f: seen.append(f.shape)))
             output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             run(opts)
         summary = json.loads(output.getvalue())
-        self.assertGreater(len(seen), 1)
+        self.assertEqual(len(seen), 3)
         self.assertTrue(all(shape == (720, 1280, 3) for shape in seen))
         self.assertIn("busy", summary["camera_error"])
         self.assertEqual(summary["dtype"], "uint8")
