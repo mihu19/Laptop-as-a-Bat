@@ -72,6 +72,9 @@ def render(snapshot, health):
         x = 661+i*295
         freq = snapshot["carriers"][i] / 1000
         label(frame, f"{name}   {freq:.2f} kHz", x, 134, 0.45, color)
+        shift = snapshot["shifts"][i]
+        if np.isfinite(shift):
+            label(frame, f"{shift:+.0f} Hz", x+190, 134, 0.44, color)
         cv2.line(frame, (x+136, 140), (x+136, 294), LINE)
         trace(frame, snapshot["spectrum"][i], x, 139, 273, 62, 0, 50, color)
         fall = np.uint8(np.clip(snapshot["waterfall"][:, i, :]/50, 0, 1)*255)

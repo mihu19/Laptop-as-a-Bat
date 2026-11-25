@@ -224,6 +224,8 @@ class DSPProcessor:
         self.velocity_rows = np.clip(np.rint(40 - 10 * 343 * self.hz /
                                              (2*self.carriers[:, None])).astype(int), 0, 80)
         self.spectrum = np.zeros((2, len(OFFSETS)), np.float32)
+        self.shifts = np.full(2, np.nan)
+        self.bandwidths = np.zeros((2, 2))
         self.waterfall = deque(maxlen=100)
         self.breath = Breathing(2 * channels)
         self.gestures = Gestures()
@@ -261,6 +263,8 @@ class DSPProcessor:
         self.gestures.reset()
         self.radar.fill(0)
         self.spectrum.fill(0)
+        self.shifts.fill(np.nan)
+        self.bandwidths.fill(0)
         self.waterfall.clear()
         self.target = self.zone = None
 
@@ -369,6 +373,27 @@ class DSPProcessor:
         denom = speakers.sum(axis=0) + EPS
         return np.array([(speakers[1]-speakers[0])/denom, (mics[-1]-mics[0])/denom])
 
+    def _track_shifts(self, spectra):
+        for i, power in enumerate(spectra):
+            active = np.flatnonzero(power)
+            if not active.size:
+                self.shifts[i] = np.nan
+                self.bandwidths[i] = 0
+                continue
+            offsets = self.hz[i, active]
+            self.bandwidths[i] = (max(0, -offsets.min()), max(0, offsets.max()))
+            peak = int(power.argmax())
+            estimate = self.hz[i, peak]
+            if 0 < peak < len(power)-1:
+                left, center, right = power[peak-1:peak+2]
+                curvature = left - 2*center + right
+                if curvature < -EPS:
+                    estimate += BIN_HZ*np.clip(0.5*(left-right)/curvature, -0.5, 0.5)
+            previous = self.shifts[i]
+            if np.isfinite(previous) and abs(estimate-previous) < 50:
+                estimate = 0.65*estimate + 0.35*previous
+            self.shifts[i] = estimate
+
     def _analyze(self, power, iq, samples, t):
         threshold = np.maximum.reduce((12*self.floor, self.floor + 8*self.mad,
                                        np.broadcast_to(self.gains[:, :, None]*2e-5, power.shape)))
@@ -378,6 +403,7 @@ class DSPProcessor:
         adjacent[:, :, :-1] |= mask[:, :, 1:]
         residual = np.where(mask & adjacent & self.usable[:, :, None],
                             (power-self.floor)/self.gains[:, :, None], 0)
+        self._track_shifts(residual.sum(axis=1))
         ratio = np.maximum(power / np.maximum(self.floor, EPS), 1)
         self.spectrum = np.clip(10*np.log10(ratio.max(axis=1)), 0, 50)
         if self.hops % 4 == 0:
@@ -428,6 +454,7 @@ class DSPProcessor:
         progress = min(1, self.learn_hops / (100*(self.quiet if self.active else self.calibration)))
         return dict(time=self.expected/RATE, state=self.state, ready=self.ready, progress=progress,
                     radar=self.radar.copy(), target=self.target, spectrum=self.spectrum.copy(),
+                    shifts=self.shifts.copy(), bandwidths=self.bandwidths.copy(),
                     waterfall=fall, waveform=self.breath.waveform(), bpm=self.breath.bpm,
                     quality=self.breath.quality, breath_state=self.breath.state,
                     clean_seconds=self.breath.count/100,

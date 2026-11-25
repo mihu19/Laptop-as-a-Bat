@@ -33,37 +33,37 @@ class Block:
 
 
 class CaptureRing:
-    """Bounded single-producer FIFO. A busy reader never blocks the callback."""
+    """Transfer ownership of preallocated slots via thread-safe deque operations."""
 
     def __init__(self, channels, capacity=200):
         self.data = np.empty((capacity, HOP, channels), np.float32)
         self.metadata = [None] * capacity
-        self.lock = Lock()
-        self.read = self.write = self.drops = 0
+        self.free = deque(range(capacity))
+        self.ready = deque()
+        self.drops = 0
 
     def put(self, samples, metadata):
-        if not self.lock.acquire(blocking=False):
-            self.drops += 1
-            return
         try:
-            if self.write - self.read == len(self.data):
-                self.read += 1
-                self.drops += 1
-            slot = self.write % len(self.data)
-            self.data[slot] = samples
-            self.metadata[slot] = metadata
-            self.write += 1
-        finally:
-            self.lock.release()
+            slot = self.free.popleft()
+        except IndexError:
+            self.drops += 1
+            try:
+                slot = self.ready.popleft()  # reclaim the oldest unread block
+            except IndexError:
+                return  # all slots currently owned by the consumer
+        self.data[slot] = samples
+        self.metadata[slot] = metadata
+        self.ready.append(slot)
 
     def pop(self):
-        with self.lock:
-            if self.read == self.write:
-                return None
-            slot = self.read % len(self.data)
-            result = Block(self.data[slot].copy(), *self.metadata[slot])
-            self.read += 1
-            return result
+        try:
+            slot = self.ready.popleft()
+        except IndexError:
+            return None
+        try:
+            return Block(self.data[slot].copy(), *self.metadata[slot])
+        finally:
+            self.free.append(slot)
 
 
 class Transmitter:
