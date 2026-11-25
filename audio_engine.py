@@ -8,6 +8,7 @@ from time import monotonic
 import numpy as np
 import sounddevice as sd
 from sonar_imaging import Probe, PERIOD
+from nearfield import ChirpProbe
 
 RATE = 48_000
 HOP = 480
@@ -85,7 +86,8 @@ class Transmitter:
         self.omega = 2 * np.pi * np.array(validate_carriers(carriers)) / RATE
         self.angles = np.arange(HOP)[:, None] * self.omega
         self.work = np.empty_like(self.angles)
-        self.probe = Probe(carriers) if imaging else None
+        self.probe = ChirpProbe(carriers) if imaging == "chirp" else Probe(carriers) if imaging else None
+        self.chirped = imaging == "chirp"
         self.ramp = (1 - np.cos(np.pi * np.arange(2 * HOP) / (2 * HOP))) / 2
         self.lock = Lock()
         self.armed = False
@@ -161,9 +163,13 @@ class Transmitter:
                     self.reason = "cooldown / exposure budget"
             if not self.armed:
                 return False
-            np.add(self.angles, np.remainder(start * self.omega, 2 * np.pi), out=self.work)
-            np.sin(self.work, out=self.work)
-            if self.probe is not None:
+            if self.chirped:
+                offset = start % PERIOD
+                self.work[:] = self.probe.wave[offset:offset+HOP]
+            else:
+                np.add(self.angles, np.remainder(start * self.omega, 2 * np.pi), out=self.work)
+                np.sin(self.work, out=self.work)
+            if self.probe is not None and not self.chirped:
                 offset = start % PERIOD
                 self.work *= .57
                 self.work += .43*self.probe.wave[offset:offset+HOP]
