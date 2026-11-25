@@ -268,7 +268,7 @@ class DSPProcessor:
         self.waterfall.clear()
         self.target = self.zone = None
 
-    def process(self, samples, active=True, start=None, gap=False):
+    def process(self, samples, active=True, start=None, gap=False, range_lateral=None):
         if samples.shape != (HOP, self.channels):
             raise ValueError(f"Expected {HOP} frames and {self.channels} channels.")
         start = self.expected if start is None else start
@@ -308,7 +308,7 @@ class DSPProcessor:
             return
         t = self.expected / RATE
         corrected = iq * np.exp(-1j * (self.drift*(t-self.origin) + self.correction))
-        self._analyze(power, corrected, samples, t)
+        self._analyze(power, corrected, samples, t, range_lateral)
 
     def _calibrate(self):
         data = np.asarray(self.learning)
@@ -394,7 +394,7 @@ class DSPProcessor:
                 estimate = 0.65*estimate + 0.35*previous
             self.shifts[i] = estimate
 
-    def _analyze(self, power, iq, samples, t):
+    def _analyze(self, power, iq, samples, t, range_lateral):
         threshold = np.maximum.reduce((12*self.floor, self.floor + 8*self.mad,
                                        np.broadcast_to(self.gains[:, :, None]*2e-5, power.shape)))
         mask = (power > threshold) & (abs(self.hz[:, None]) >= 36) & (abs(self.hz[:, None]) <= 400)
@@ -417,7 +417,8 @@ class DSPProcessor:
         else:
             sides = np.stack([(residual*(self.hz[:, None] > 0)).sum(axis=(1, 2)),
                               (residual*(self.hz[:, None] < 0)).sum(axis=(1, 2))], axis=1)
-            self.gestures.update(t, sides, x, bool(self.cue_maps))
+            self.gestures.update(t, sides, x if range_lateral is None else range_lateral,
+                                 bool(self.cue_maps) or range_lateral is not None)
         self.radar *= np.exp(-0.01 / 0.35)
         self.target = None
         if motion:

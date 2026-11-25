@@ -16,7 +16,8 @@ import sounddevice as sd
 
 from audio_engine import AudioEngine, Block, CARRIERS, DEFAULT_GAIN, HOP, MAX_GAIN, RATE
 from dsp_processor import DSPProcessor
-from visualizer_cam import CameraOutput, FPS, HEIGHT, WIDTH, render
+from sonar_imaging import RangeCamera, demo_echo
+from visualizer_cam import CameraOutput, FPS, HEIGHT, WIDTH, render, render_sonar
 
 
 def wav_input(path):
@@ -67,14 +68,17 @@ def demo_block(start, calibration, quiet, carriers):
 
 
 class Worker:
-    def __init__(self, dsp, engine=None, recording=None):
+    def __init__(self, dsp, engine=None, recording=None, range_cam=None):
         self.dsp = dsp
         self.engine = engine
         self.recording = recording
+        self.range_cam = range_cam
+        self.range_start = None
+        self.expected = None
         self.stop = Event()
         self.ended = Event()
         self.commands = SimpleQueue()
-        self.latest = dsp.snapshot()
+        self.latest = self.snapshot()
         self.error = None
         self.blocks = 0
         self.thread = Thread(target=self._run, name="sonar-dsp")
@@ -83,12 +87,47 @@ class Worker:
         self.thread.start()
         return self
 
+    def snapshot(self):
+        snap = self.dsp.snapshot()
+        cam = self.range_cam
+        if cam is not None:
+            snap.update(depth=cam.grid.copy(), depth_locked=cam.locked,
+                        depth_span=(float(cam.ranges[0]), float(cam.ranges[-1])),
+                        range_calibrated=cam.calibrated, guide=cam.calibration_status,
+                        range_bpm=cam.breath.bpm, range_quality=cam.breath.quality,
+                        range_wave=cam.breath.wave.copy(), range_seconds=cam.breath.count/25)
+        return snap
+
+    def _range(self, block):
+        cam = self.range_cam
+        if cam is None:
+            return
+        if not block.active or block.gap or block.start != self.expected:
+            if self.range_start is not None:
+                cam.reset()
+            self.range_start = None
+        self.expected = block.start + HOP
+        if not block.active or block.gap:
+            return
+        if self.range_start is None:
+            self.range_start = block.start
+        elapsed = (block.start-self.range_start)/RATE
+        if elapsed >= .12:
+            cam.process(block.samples, learn=elapsed < 1.4)
+            cam.guide_step(block.start/RATE)
+
     def _run(self):
         try:
             epoch = monotonic()
             while not self.stop.is_set():
                 try:
-                    self.dsp.mark_zone(self.commands.get_nowait())
+                    command = self.commands.get_nowait()
+                    if command == "guided" and self.range_cam is not None:
+                        self.range_cam.calibrate(self.dsp.expected/RATE)
+                    elif command == "cw center":
+                        self.dsp.mark_zone("center")
+                    else:
+                        self.dsp.mark_zone(command)
                 except Empty:
                     pass
                 if self.engine is not None:
@@ -107,16 +146,20 @@ class Worker:
                             break
                     else:
                         data = demo_block(start, self.dsp.calibration, self.dsp.quiet, self.dsp.carriers)
+                        if self.range_cam is not None and t >= self.dsp.calibration:
+                            data += demo_echo(self.range_cam.probe, start, HOP, t-self.dsp.calibration)
                         for i, zone in enumerate(("left", "center", "right")):
                             mark = self.dsp.calibration + self.dsp.quiet + i*2.2
                             if self.blocks == round(mark * RATE / HOP):
                                 self.dsp.mark_zone(zone)
                     block = Block(data, start, t >= self.dsp.calibration, False, t, t)
-                self.dsp.process(block.samples, block.active, block.start, block.gap)
+                self._range(block)
+                self.dsp.process(block.samples, block.active, block.start, block.gap,
+                                 self.range_cam.position if self.range_cam is not None else None)
                 self.blocks += 1
                 if self.blocks % 3 == 0:
-                    self.latest = self.dsp.snapshot()
-            self.latest = self.dsp.snapshot()
+                    self.latest = self.snapshot()
+            self.latest = self.snapshot()
         except Exception as exc:
             self.error = exc
         finally:
@@ -135,11 +178,14 @@ def run(args):
         raise ValueError("Duration must be a finite positive number.")
     if not (0 < args.max_volume <= MAX_GAIN):
         raise ValueError(f"Max volume must be positive and at most {MAX_GAIN:.8f}.")
+    if not 0 <= args.direct_path_m <= 1:
+        raise ValueError("Direct-path length must be between 0 and 1 metre.")
     recording = wav_input(args.replay) if args.replay else None
     carriers = (args.left_freq, args.right_freq)
     if recording is None and not args.simulate:
         engine = AudioEngine(args.input_device, args.output_device, carriers, args.max_volume,
-                             args.exclusive, args.session_seconds, args.duty_window)
+                             args.exclusive, args.session_seconds, args.duty_window,
+                             args.max_seconds, args.auto_cooldown, not args.doppler_only)
         source = "Live / WASAPI RAW requested"
     else:
         engine = None
@@ -154,7 +200,15 @@ def run(args):
         else:
             channels = recording.shape[1] if recording is not None else 2
         dsp = DSPProcessor(channels, carriers, args.calibration_duration)
-        worker = stack.enter_context(Worker(dsp, engine, recording))
+        route = None
+        if engine is not None:
+            route = [str(sd.query_devices(i)["name"]) for i in engine.devices]
+            route.extend([channels, *carriers, args.exclusive])
+        has_probe = not args.doppler_only and (recording is None or args.ranging_replay)
+        range_cam = (RangeCamera(channels, carriers, route, args.calibration_file if engine else None,
+                                 args.direct_path_m)
+                     if has_probe else None)
+        worker = stack.enter_context(Worker(dsp, engine, recording, range_cam))
         cam = stack.enter_context(CameraOutput(not args.no_virtual_cam))
         if not args.headless:
             cv2.namedWindow("Bat Cam", cv2.WINDOW_NORMAL)
@@ -163,6 +217,7 @@ def run(args):
         if engine is not None:
             stack.callback(engine.tx.mute)
         begin = deadline = monotonic()
+        view = args.view or ("debug" if range_cam is None else "hud")
         last_audio = begin
         previous_blocks = 0
         while True:
@@ -182,8 +237,12 @@ def run(args):
                           remaining=(tx.session-tx.used)/RATE if tx else 120,
                           reason=tx.reason if tx else "playback disabled",
                           xruns=engine.xruns if engine else 0,
-                          drops=engine.ring.drops if engine else 0)
-            frame = render(snap, health)
+                          drops=engine.ring.drops if engine else 0,
+                          simulated=args.simulate)
+            if view == "debug":
+                frame = render(snap, health)
+            else:
+                frame = render_sonar(snap, health, hud=view=="hud")
             cam.latest = frame
             frame_count += 1
             if not args.headless:
@@ -198,16 +257,26 @@ def run(args):
                     if tx:
                         tx.mute()
                     break
-                if tx and key in (ord("m"), ord("M")):
-                    tx.mute("emergency mute")
-                if tx and key == 32:
-                    if tx.armed:
-                        tx.mute()
+                key = key | 32
+                if tx and key in (32, ord("m")):
+                    if tx.armed or tx.resume_at is not None:
+                        tx.mute("muted")
                     elif snap["ready"]:
                         tx.arm()
-                zones = {ord("l"): "left", ord("c"): "center", ord("r"): "right"}
-                if (key | 32) in zones:
-                    worker.commands.put(zones[key | 32])
+                if tx and key == ord("r") and snap["ready"]:
+                    tx.arm(reset_demo=True)
+                if key == ord("v"):
+                    view = {"pure": "hud", "hud": "debug", "debug": "pure"}[view]
+                if key == ord("h"):
+                    view = "hud" if view == "pure" else "pure"
+                if key == ord("c"):
+                    worker.commands.put("guided")
+                if key == ord("1"):
+                    worker.commands.put("left")
+                if key == ord("2"):
+                    worker.commands.put("cw center")
+                if key == ord("3"):
+                    worker.commands.put("right")
             if worker.ended.is_set() or (args.duration and now - begin >= args.duration):
                 break
             deadline += 1 / FPS
@@ -228,7 +297,9 @@ def run(args):
                           xruns=health["xruns"], drops=health["drops"], camera=cam.status,
                           camera_error=cam.error, sent=cam.frames, state=worker.latest["state"],
                           gestures=[e.name for e in worker.latest["events"]],
-                          bpm=worker.latest["bpm"])))
+                          bpm=worker.latest.get("range_bpm", worker.latest["bpm"]),
+                          range_locked=worker.latest.get("depth_locked", False),
+                          range_peak=float(worker.latest["depth"].max()) if range_cam else None)))
 
 
 def parser():
@@ -243,6 +314,14 @@ def parser():
                    help="maximum continuous and cumulative on-time in the duty window, up to 120 s")
     p.add_argument("--duty-window", type=float, default=180,
                    help="rolling exposure window in seconds, 180..3600")
+    p.add_argument("--max-seconds", type=float, default=300, help="demo timer, independent of exposure budget")
+    p.add_argument("--auto-cooldown", action="store_true", help="resume after at least 2 s when exposure permits")
+    p.add_argument("--view", choices=("hud", "pure", "debug"))
+    p.add_argument("--calibration-file", type=Path, default=Path("calibration.json"))
+    p.add_argument("--ranging-replay", action="store_true", help="WAV contains the Phase 3 multitone probe")
+    p.add_argument("--doppler-only", action="store_true", help="run the original CW-only transmitter and debug view")
+    p.add_argument("--direct-path-m", type=float, default=0,
+                   help="approximate speaker-to-mic path length for the range axis")
     p.add_argument("--calibration-duration", type=float, default=3, help="muted ambient seconds")
     p.add_argument("--exclusive", action="store_true", help="request exclusive WASAPI with RAW")
     p.add_argument("--no-virtual-cam", "--preview-only", action="store_true")

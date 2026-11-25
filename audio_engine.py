@@ -7,6 +7,7 @@ from time import monotonic
 
 import numpy as np
 import sounddevice as sd
+from sonar_imaging import Probe, PERIOD
 
 RATE = 48_000
 HOP = 480
@@ -69,16 +70,22 @@ class CaptureRing:
 class Transmitter:
     """Account in DAC frames. The same budget survives every manual toggle."""
 
-    def __init__(self, carriers=CARRIERS, gain=DEFAULT_GAIN, session=120, window=180):
+    def __init__(self, carriers=CARRIERS, gain=DEFAULT_GAIN, session=120, window=180,
+                 imaging=False, max_seconds=300, auto_cooldown=False):
         if not (0 < gain <= MAX_GAIN and HOP/RATE <= session <= 120
-                and 180 <= window <= 3600):
+                and 180 <= window <= 3600 and .01 <= max_seconds <= 86400):
             raise ValueError("Invalid output cap or time budget.")
         self.gain = gain
         self.session = round(session * RATE)
         self.window = round(window * RATE)
+        self.demo_limit = round(max_seconds * RATE)
+        self.auto_cooldown = auto_cooldown
+        self.demo_start = None
+        self.resume_at = None
         self.omega = 2 * np.pi * np.array(validate_carriers(carriers)) / RATE
         self.angles = np.arange(HOP)[:, None] * self.omega
         self.work = np.empty_like(self.angles)
+        self.probe = Probe(carriers) if imaging else None
         self.ramp = (1 - np.cos(np.pi * np.arange(2 * HOP) / (2 * HOP))) / 2
         self.lock = Lock()
         self.armed = False
@@ -90,18 +97,22 @@ class Transmitter:
         self.total_emitted = 0
         self.fault_pending = False
 
-    def arm(self):
+    def arm(self, reset_demo=False):
         with self.lock:
+            if reset_demo:
+                self.demo_start = None
             if self.used + HOP <= self.session and not self.armed:
                 self.heartbeat = monotonic()
                 self.armed = True
                 self.continuous = 0
                 self.reason = "armed"
+                self.resume_at = None
             return self.armed
 
     def mute(self, reason="muted"):
         with self.lock:
             self.armed = False
+            self.resume_at = None
             self.peak = 0.0
             self.reason = reason
 
@@ -123,13 +134,39 @@ class Transmitter:
                 self.armed = False
                 self.reason = "stream fault" if self.fault_pending else "control timeout"
                 self.fault_pending = False
+                self.resume_at = None
+            if self.resume_at is not None and monotonic() - self.heartbeat > .5:
+                self.resume_at = None
+                self.reason = "control timeout"
+            if self.resume_at is not None and start >= self.resume_at:
+                if self.used + min(self.session, 15*RATE) <= self.session:
+                    self.armed = True
+                    self.continuous = 0
+                    self.demo_start = None
+                    self.resume_at = None
+                    self.reason = "armed"
+            if self.armed and self.demo_start is None:
+                self.demo_start = start
+            if self.armed and start + HOP - self.demo_start > self.demo_limit:
+                self.armed = False
+                self.reason = "demo timer - press R"
+                if self.auto_cooldown:
+                    self.resume_at = start + 2*RATE
+                    self.reason = "cooldown"
             if self.armed and max(self.used, self.continuous) + len(out) > self.session:
                 self.armed = False
-                self.reason = "time limit"
+                self.reason = "exposure budget - press R when ready"
+                if self.auto_cooldown:
+                    self.resume_at = start + 2*RATE
+                    self.reason = "cooldown / exposure budget"
             if not self.armed:
                 return False
             np.add(self.angles, np.remainder(start * self.omega, 2 * np.pi), out=self.work)
             np.sin(self.work, out=self.work)
+            if self.probe is not None:
+                offset = start % PERIOD
+                self.work *= .57
+                self.work += .43*self.probe.wave[offset:offset+HOP]
             np.multiply(self.work, self.gain, out=out)
             if self.continuous < len(self.ramp):
                 ramp = self.ramp[self.continuous:self.continuous + len(out)]
@@ -178,10 +215,12 @@ def raw_settings(exclusive):
 
 class AudioEngine:
     def __init__(self, input_id=None, output_id=None, carriers=CARRIERS,
-                 gain=DEFAULT_GAIN, exclusive=False, session=120, window=180):
+                 gain=DEFAULT_GAIN, exclusive=False, session=120, window=180,
+                 max_seconds=300, auto_cooldown=False, imaging=True):
         self.devices = wasapi_devices(input_id, output_id)
         self.channels = min(2, sd.query_devices(self.devices[0])["max_input_channels"])
-        self.tx = Transmitter(carriers, gain, session, window)
+        self.tx = Transmitter(carriers, gain, session, window, imaging=imaging,
+                              max_seconds=max_seconds, auto_cooldown=auto_cooldown)
         self.exclusive = exclusive
         self.stream = None
         self.start = self.xruns = self.blocks = 0

@@ -133,8 +133,71 @@ def render(snapshot, health):
     label(frame, f'{status}  |  {health["reason"]}', 26, 672, 0.51, MINT)
     label(frame, f'SNR L/R {snapshot["snr"][0]:.0f}/{snapshot["snr"][1]:.0f} dB'
           f'    xruns {health["xruns"]}    drops {health["drops"]}', 796, 672, 0.44, DIM)
-    label(frame, "Space  arm / mute      M  emergency mute      L / C / R  mark zones      Esc  exit",
+    label(frame, "M  arm / mute      R  resume      C  calibrate      1 / 2 / 3  Doppler zones      V  view",
           26, 703, 0.44, DIM)
+    return frame
+
+
+def render_sonar(snapshot, health, hud=True):
+    grid = snapshot.get("depth")
+    if grid is None:
+        grid = np.zeros((113, 64), np.float32)
+    # At the bottom of the image, returns are closest to the laptop.
+    soft = cv2.bilateralFilter(np.ascontiguousarray(grid[::-1]), 5, .12, 2)
+    gray = np.uint8(np.clip(soft*255, 0, 255))
+    gray = cv2.resize(gray, (WIDTH, HEIGHT), interpolation=cv2.INTER_CUBIC)
+    frame = cv2.applyColorMap(gray, cv2.COLORMAP_INFERNO)
+    if not hud:
+        return frame
+
+    label(frame, "BAT CAM   /   RANGE VIEW", 28, 40, .65)
+    status = snapshot["state"]
+    if snapshot.get("depth_locked"):
+        status = ("L/R calibrated" if snapshot.get("range_calibrated")
+                  else "L/R estimate   C to calibrate")
+    elif status == "sensing":
+        status = "No range reference   V for Doppler"
+    label(frame, status, 30, 64, .45, DIM)
+    span = snapshot.get("depth_span")
+    if span and snapshot.get("depth_locked"):
+        label(frame, f"{span[0]:.2f}-{span[1]:.2f} m approx.", 30, 88, .45, DIM)
+    if health.get("simulated"):
+        label(frame, "SYNTHETIC", 30, 111, .43, AMBER)
+    guide = snapshot.get("guide")
+    if guide:
+        label(frame, guide, 30, 135 if health.get("simulated") else 111, .49, AMBER)
+
+    t = snapshot["time"]
+    bpm = snapshot.get("range_bpm")
+    wave = snapshot.get("range_wave", ())
+    if bpm is not None:
+        pulse = 4 + round(2*(1+np.sin(2*np.pi*t*bpm/60)))
+        cv2.circle(frame, (1089, 36), pulse, MINT, -1, cv2.LINE_AA)
+        label(frame, f"{bpm:.1f} BPM", 1106, 42, .67, MINT)
+        label(frame, f'Confidence {snapshot["range_quality"]:.0%}', 1090, 65, .46, DIM)
+    else:
+        elapsed = snapshot.get("range_seconds", 0)
+        label(frame, f"Breath lock {elapsed:.0f}s" if elapsed else "Waiting for torso echo",
+              1040, 40, .52, DIM)
+    if len(wave) > 1:
+        span = max(.01, float(np.max(abs(wave))))
+        trace(frame, wave, 1089, 77, 158, 27, -span, span, MINT)
+
+    hot = np.uint8(gray > 62)
+    contours, _ = cv2.findContours(hot, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    patches = [c for c in contours if cv2.contourArea(c) > 160]
+    cv2.drawContours(frame, patches, -1, (160, 146, 224), 1, cv2.LINE_AA)
+    if patches and snapshot.get("range_calibrated"):
+        x, y, w, h = cv2.boundingRect(max(patches, key=cv2.contourArea))
+        cv2.rectangle(frame, (x, y), (x+w-1, y+h-1), (214, 209, 211), 1)
+    events = snapshot["events"]
+    if events and t-events[-1].time < 1.5 and snapshot["state"] == "sensing":
+        tag = events[-1].name.upper().replace("LEFT", "L").replace("RIGHT", "R")
+        label(frame, tag, 30, HEIGHT-55, .9, AMBER, 2)
+    label(frame, f'{health["reason"]}   {health["remaining"]:.0f}s available',
+          30, HEIGHT-29, .48, DIM)
+    label(frame, "C  calibrate     M  mute     R  resume     H  hide     V  view",
+          850, HEIGHT-29, .47, DIM)
     return frame
 
 
