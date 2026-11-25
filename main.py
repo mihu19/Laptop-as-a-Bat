@@ -18,6 +18,7 @@ from audio_engine import AudioEngine, Block, CARRIERS, DEFAULT_GAIN, HOP, MAX_GA
 from dsp_processor import DSPProcessor
 from nearfield import NearField, NearFieldDemo
 from sonar_imaging import RangeCamera, demo_echo
+from sonar_settings import load_settings
 from visualizer_cam import CameraOutput, FPS, HEIGHT, WIDTH, render, render_nearfield, render_sonar
 
 
@@ -69,12 +70,14 @@ def demo_block(start, calibration, quiet, carriers):
 
 
 class Worker:
-    def __init__(self, dsp, engine=None, recording=None, range_cam=None, nearfield=None):
+    def __init__(self, dsp, engine=None, recording=None, range_cam=None, nearfield=None,
+                 diagnostics=False):
         self.dsp = dsp
         self.engine = engine
         self.recording = recording
         self.range_cam = range_cam
         self.nearfield = nearfield
+        self.diagnostics = diagnostics
         self.demo = (NearFieldDemo(nearfield.probe, nearfield.direct_path)
                      if nearfield is not None and engine is None and recording is None else None)
         self.range_start = None
@@ -99,13 +102,21 @@ class Worker:
     def snapshot(self):
         if self.nearfield is not None:
             near = self.nearfield
-            return dict(time=self.blocks*HOP/RATE, state="sensing" if self.active else "muted",
+            snapshot = dict(time=self.blocks*HOP/RATE, state="sensing" if self.active else "muted",
                         ready=True, depth=near.grid.copy(), depth_locked=near.locked,
                         range_bpm=near.breath.bpm, range_quality=near.breath.quality,
                         range_wave=near.breath.wave.copy(), range_seconds=near.breath.seconds,
                         events=tuple(near.events), snr=near.snr.copy(), bpm=None,
                         gated_spectrum=near.spec.copy(),
-                        gated_waterfall=np.array(near.waterfall).copy(), position=near.position)
+                        gated_waterfall=np.array(near.waterfall).copy(), position=near.position,
+                        smoothing=near.settings.smoothing)
+            if self.diagnostics:
+                snapshot["tuning"] = dict(time=snapshot["time"], locked=near.locked,
+                                          echo=near.echo_power, noise=near.noise_power,
+                                          energy=near.stereo_energy.copy(), cir=near.cir.copy(),
+                                          bpm=near.breath.bpm, grid=snapshot["depth"],
+                                          wave=float(np.var(near.breath.wave)) if near.breath.wave.size else 0.)
+            return snapshot
         snap = self.dsp.snapshot()
         cam = self.range_cam
         if cam is not None:
@@ -225,7 +236,9 @@ def run(args):
         raise ValueError("Duration must be a finite positive number.")
     if args.transmit and (not args.headless or args.duration is None):
         raise ValueError("--transmit requires --headless and a bounded --duration.")
-    if not (0 < args.max_volume <= MAX_GAIN):
+    settings = load_settings()
+    gain = settings.gain if args.max_volume is None else args.max_volume
+    if not (0 < gain <= MAX_GAIN):
         raise ValueError(f"Max volume must be positive and at most {MAX_GAIN:.8f}.")
     if not 0 <= args.direct_path_m <= 1:
         raise ValueError("Direct-path length must be between 0 and 1 metre.")
@@ -233,9 +246,10 @@ def run(args):
     carriers = validate_carriers((args.left_freq, args.right_freq))
     near_enabled = not args.doppler_only and (recording is None or args.nearfield_replay)
     if recording is None and not args.simulate:
-        engine = AudioEngine(args.input_device, args.output_device, carriers, args.max_volume,
+        engine = AudioEngine(args.input_device, args.output_device, carriers, gain,
                              args.exclusive, args.session_seconds, args.duty_window,
-                             args.max_seconds, args.auto_cooldown, "chirp" if near_enabled else False)
+                             args.max_seconds, args.auto_cooldown, "chirp" if near_enabled else False,
+                             settings)
         source = "Live / WASAPI RAW requested"
     else:
         engine = None
@@ -250,7 +264,8 @@ def run(args):
         else:
             channels = recording.shape[1] if recording is not None else 2
         dsp = None if near_enabled else DSPProcessor(channels, carriers, args.calibration_duration)
-        near = NearField(channels, carriers, args.direct_path_m) if near_enabled else None
+        probe = engine.tx.probe if engine else None
+        near = NearField(channels, carriers, args.direct_path_m, settings, probe) if near_enabled else None
         has_legacy_probe = recording is not None and args.ranging_replay and not near_enabled
         range_cam = RangeCamera(channels, carriers, direct_path=args.direct_path_m) if has_legacy_probe else None
         worker = stack.enter_context(Worker(dsp, engine, recording, range_cam, near))
@@ -359,7 +374,7 @@ def parser():
     p.add_argument("--output-device", type=int, help="WASAPI stereo speaker ID")
     p.add_argument("--left-freq", type=float, default=CARRIERS[0])
     p.add_argument("--right-freq", type=float, default=CARRIERS[1])
-    p.add_argument("--max-volume", type=float, default=DEFAULT_GAIN, help="linear peak amplitude")
+    p.add_argument("--max-volume", type=float, help="override the configured linear peak amplitude")
     p.add_argument("--session-seconds", type=float, default=120,
                    help="maximum continuous and cumulative on-time in the duty window, up to 120 s")
     p.add_argument("--duty-window", type=float, default=180,

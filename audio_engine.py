@@ -72,7 +72,7 @@ class Transmitter:
     """Account in DAC frames. The same budget survives every manual toggle."""
 
     def __init__(self, carriers=CARRIERS, gain=DEFAULT_GAIN, session=120, window=180,
-                 imaging=False, max_seconds=300, auto_cooldown=False):
+                 imaging=False, max_seconds=300, auto_cooldown=False, settings=None):
         if not (0 < gain <= MAX_GAIN and HOP/RATE <= session <= 120
                 and 180 <= window <= 3600 and .01 <= max_seconds <= 86400):
             raise ValueError("Invalid output cap or time budget.")
@@ -86,7 +86,7 @@ class Transmitter:
         self.omega = 2 * np.pi * np.array(validate_carriers(carriers)) / RATE
         self.angles = np.arange(HOP)[:, None] * self.omega
         self.work = np.empty_like(self.angles)
-        self.probe = ChirpProbe(carriers) if imaging == "chirp" else Probe(carriers) if imaging else None
+        self.probe = ChirpProbe(carriers, settings) if imaging == "chirp" else Probe(carriers) if imaging else None
         self.chirped = imaging == "chirp"
         self.ramp = (1 - np.cos(np.pi * np.arange(2 * HOP) / (2 * HOP))) / 2
         self.lock = Lock()
@@ -222,11 +222,11 @@ def raw_settings(exclusive):
 class AudioEngine:
     def __init__(self, input_id=None, output_id=None, carriers=CARRIERS,
                  gain=DEFAULT_GAIN, exclusive=False, session=120, window=180,
-                 max_seconds=300, auto_cooldown=False, imaging=True):
+                 max_seconds=300, auto_cooldown=False, imaging=True, settings=None):
         self.devices = wasapi_devices(input_id, output_id)
         self.channels = min(2, sd.query_devices(self.devices[0])["max_input_channels"])
         self.tx = Transmitter(carriers, gain, session, window, imaging=imaging,
-                              max_seconds=max_seconds, auto_cooldown=auto_cooldown)
+                              max_seconds=max_seconds, auto_cooldown=auto_cooldown, settings=settings)
         self.exclusive = exclusive
         self.stream = None
         self.start = self.xruns = self.blocks = 0

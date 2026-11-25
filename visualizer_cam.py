@@ -204,6 +204,8 @@ def render_sonar(snapshot, health, hud=True):
 def render_nearfield(snapshot, health, view):
     grid = np.ascontiguousarray(snapshot["depth"][::-1])
     filtered = cv2.bilateralFilter(grid, 5, .14, 2)
+    if snapshot.get("smoothing"):
+        filtered = cv2.GaussianBlur(filtered, (0, 0), snapshot["smoothing"])
     # Keep the mesh on measured support. Depth controls brightness and perspective.
     slope = cv2.Sobel(filtered, cv2.CV_32F, 0, 1, ksize=3)
     brightness = np.clip(filtered + .12*slope, 0, 1)

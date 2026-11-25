@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy import signal
+from sonar_settings import SonarSettings
 
 RATE = 48000
 PERIOD = 1920
@@ -29,20 +30,22 @@ class MotionEvent:
 class ChirpProbe:
     """One windowed chirp per speaker. CW pilots occupy the latter part of its slot."""
 
-    def __init__(self, carriers):
+    def __init__(self, carriers, settings=None):
+        settings = settings or SonarSettings()
         self.wave = np.zeros((PERIOD, 2))
         self.filters = []
         self.pilot_refs = []
         t = np.arange(CHIRP_SAMPLES)/RATE
         window = signal.windows.tukey(CHIRP_SAMPLES, .26)
         frequencies = np.fft.fftfreq(PERIOD, 1/RATE)
-        for side, ends in enumerate(((17500, 21500), (21500, 17500))):
+        sweep = (settings.low_hz, settings.high_hz)
+        for side, ends in enumerate((sweep, sweep[::-1])):
             chirp = window*signal.chirp(t, ends[0], CHIRP_SAMPLES/RATE, ends[1])
             packet = self.wave[:, side]
             offset = SLOT*side
             packet[offset:offset+CHIRP_SAMPLES] = chirp
             template = np.fft.fft(packet)
-            band = (frequencies >= 17250) & (frequencies <= 21750)
+            band = (frequencies >= sweep[0]-250) & (frequencies <= sweep[1]+250)
             # Remove the dominant pilot bins from the pulse compressor.
             for carrier in carriers:
                 band &= abs(frequencies-carrier) > 110
@@ -130,8 +133,9 @@ class TorsoRate:
 
 
 class NearField:
-    def __init__(self, channels, carriers, direct_path=.15):
-        self.probe = ChirpProbe(carriers)
+    def __init__(self, channels, carriers, direct_path=.15, settings=None, probe=None):
+        self.settings = settings or SonarSettings()
+        self.probe = probe or ChirpProbe(carriers, self.settings)
         self.channels = channels
         self.carriers = np.asarray(carriers)
         self.direct_path = direct_path
@@ -155,6 +159,10 @@ class NearField:
         self.spec_floor = None
         self.waterfall = deque(maxlen=100)
         self.snr = np.zeros(2)
+        self.echo_power = 0.
+        self.noise_power = 0.
+        self.stereo_energy = np.zeros(2)
+        self.cir = np.zeros_like(RANGES)
         self.locked = False
         self.first_lock = None
         self.last_valid = None
@@ -208,6 +216,9 @@ class NearField:
         self.snr = 20*np.log10(np.maximum(snr.max(axis=1), 1e-5))
         self.locked = bool(valid.any())
         if not self.locked:
+            self.echo_power = self.noise_power = 0.
+            self.stereo_energy.fill(0)
+            self.cir.fill(0)
             self.ref_index = None
             self.grid *= .55
             self.position = None
@@ -235,6 +246,10 @@ class NearField:
         # accepting any matched peak. They never enter the scene or trackers.
         offsets = np.arange(-72, 620)
         measured = self._echoes(profiles, index, peak, valid, offsets)
+        squared = abs(measured)**2
+        self.cir = squared.max(axis=(0, 1))
+        self.echo_power = float(self.cir[RANGES >= .20].max())
+        self.stereo_energy = squared[:, :, RANGES >= .20].sum(axis=(1, 2))
         clean = self._mti(measured, valid)
         self._scene(measured, clean, valid, t)
         self._diagnostics(clean)
@@ -243,6 +258,7 @@ class NearField:
         # Each accepted tap is tagged by its own interpolated path length.
         n = len(RANGES)
         measured = np.zeros((2, self.channels, n), complex)
+        floors = []
         for mic in range(self.channels):
             usable = valid[:, mic]
             if not usable.any():
@@ -262,19 +278,24 @@ class NearField:
                         direct[spk] += coefficient
             for _ in range(14):
                 response = np.take_along_axis(abs(residual), grid, axis=1)*usable[:, None]
-                threshold = np.maximum(.022*peak[:, mic], 4*np.median(response, axis=1))
+                threshold = np.maximum(.022*peak[:, mic],
+                                       self.settings.noise_multiplier*np.median(response, axis=1))
                 scores = response/(threshold[:, None]+1e-12)
                 spk, i = np.unravel_index(scores.argmax(), scores.shape)
                 if scores[spk, i] <= 1:
                     break
                 coefficient, fraction = self._remove_tap(residual, spk, grid[spk, i])
                 distance = (offsets[i]+fraction)*METRES_PER_SAMPLE + self.direct_path/2
-                if NEAR <= distance <= FAR:
+                if self.settings.blanking_m <= distance <= FAR:
                     row = round((distance-NEAR)/(FAR-NEAR)*(n-1))
                     scale = max(self.gain[spk, mic], 1e-10)
                     value = coefficient*np.exp(-1j*np.angle(direct[spk]))/scale
                     if abs(value) > .043:
                         measured[spk, mic, row] += value
+            for spk in np.flatnonzero(usable):
+                residual_power = abs(residual[spk, grid[spk]])**2
+                floors.append(float(np.median(residual_power))/max(self.gain[spk, mic]**2, 1e-20))
+        self.noise_power = float(np.median(floors)) if floors else 0.
         return measured
 
     def _remove_tap(self, residual, spk, index):
@@ -294,7 +315,7 @@ class NearField:
         # The tap locations can move by one bin as sub-sample delay changes.
         background = self.clutter
         clean = measured-background
-        background += .02*clean*valid[:, :, None]
+        background += self.settings.alpha*clean*valid[:, :, None]
         return clean*valid[:, :, None]
 
     def _scene(self, measured, clean, valid, t):
@@ -330,8 +351,8 @@ class NearField:
             np.maximum(target, level*depth_shape[:, None]*shape, out=target)
             if activity > .018:
                 motion.append((activity, depth, lateral, bool(ratios)))
-        self.grid *= .64
-        self.grid += .36*target
+        self.grid *= self.settings.persistence
+        self.grid += (1-self.settings.persistence)*target
         self.position = None
         if motion:
             _, depth, x, horizontal = max(motion)

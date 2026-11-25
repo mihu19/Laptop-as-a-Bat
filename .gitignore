@@ -4,3 +4,6 @@ __pycache__/
 .pytest_cache/
 calibration.json
 calibration.tmp
+sonar_config.json
+sonar_config.tmp
+sonar_debug/
