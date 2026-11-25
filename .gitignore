@@ -7,3 +7,5 @@ calibration.tmp
 sonar_config.json
 sonar_config.tmp
 sonar_debug/
+models/*.joblib
+models/*.tmp

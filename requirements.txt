@@ -3,3 +3,5 @@ scipy>=1.13,<2
 sounddevice==0.5.5
 opencv-python>=4.9,<5
 pyvirtualcam>=0.12,<1
+scikit-learn>=1.5,<2
+joblib>=1.4,<2
