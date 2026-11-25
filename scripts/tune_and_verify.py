@@ -29,7 +29,7 @@ def foreground(frame):
     return labels == index, stats[index, :4].tolist()
 
 
-def assess(samples, coverage, ious):
+def assess(samples, coverage, ious, widths):
     ratios = [max(-100., 10*np.log10(s["echo"]/s["noise"]))
               if s["locked"] and s["echo"] > 0 and s["noise"] > 0 else -100. for s in samples]
     energies = np.sum([s["energy"] for s in samples], axis=0)
@@ -45,11 +45,14 @@ def assess(samples, coverage, ious):
                   detection_fraction=float(np.mean(np.asarray(ratios) > -100)),
                   silhouette_coverage=float(np.median(coverage)),
                   frame_iou=float(np.median(ious)) if ious else 0.,
+                  localized_fraction=float(np.mean((np.asarray(widths) > 0)
+                                                     & (np.asarray(widths) <= .80))),
                   stereo_imbalance=imbalance, stereo_energy=energies.tolist(),
                   bpm_valid=bpm_valid, bpm=samples[-1]["bpm"], out_of_gate_energy=leakage,
                   lock_fraction=float(np.mean([s["locked"] for s in samples])))
     result["checks"] = dict(snr=result["snr_db"] >= 12,
-                            coverage=.08 <= result["silhouette_coverage"] <= .45,
+                            coverage=.08 <= result["silhouette_coverage"] <= .45
+                            and result["localized_fraction"] >= .75,
                             iou=result["frame_iou"] >= .75,
                             stereo=imbalance <= .15 and total > 0,
                             breathing=bpm_valid, range_gate=leakage == 0.)
@@ -57,7 +60,7 @@ def assess(samples, coverage, ious):
 
 
 def capture(settings, seconds, folder, camera_enabled):
-    samples, coverage, ious = [], [], []
+    samples, coverage, ious, widths = [], [], [], []
     previous = None
     best_image = None
     best_coverage = 0.
@@ -80,6 +83,7 @@ def capture(settings, seconds, folder, camera_enabled):
                     mask, bounds = foreground(frame)
                     fraction = float(mask.mean())
                     coverage.append(fraction)
+                    widths.append(bounds[2]/frame.shape[1] if bounds else 0.)
                     if fraction > best_coverage:
                         best_image, best_coverage = frame, fraction
                     if previous is not None:
@@ -96,7 +100,7 @@ def capture(settings, seconds, folder, camera_enabled):
         faults, drops = engine.xruns, engine.ring.drops
     if not samples:
         raise RuntimeError("Diagnostic did not receive microphone frames.")
-    report = assess(samples, coverage, ious)
+    report = assess(samples, coverage, ious, widths)
     report.update(settings=asdict(settings), duration=seconds, output_seconds=output_seconds,
                   xruns=faults, drops=drops, camera_frames=camera.frames, camera_error=camera.error,
                   camera=camera.status, frames_scored=len(coverage), face_verified=False,
