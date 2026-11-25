@@ -11,11 +11,11 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from audio_engine import AudioEngine, CARRIERS, MAX_GAIN, RATE
+from audio_engine import AudioEngine, MAX_GAIN, RATE
 from main import Worker
 from nearfield import FAR, RANGES, NearField
 from sonar_settings import load_settings, save_settings
-from visualizer_cam import CameraOutput, render_nearfield
+from visualizer_cam import CameraOutput, render_nearfield, render_portrait
 
 MAX_TEST_GAIN = min(.010, MAX_GAIN)
 
@@ -29,7 +29,7 @@ def foreground(frame):
     return labels == index, stats[index, :4].tolist()
 
 
-def assess(samples, coverage, ious, widths):
+def assess(samples, coverage, ious, widths, portrait=False):
     ratios = [max(-100., 10*np.log10(s["echo"]/s["noise"]))
               if s["locked"] and s["echo"] > 0 and s["noise"] > 0 else -100. for s in samples]
     energies = np.sum([s["energy"] for s in samples], axis=0)
@@ -51,11 +51,15 @@ def assess(samples, coverage, ious, widths):
                   bpm_valid=bpm_valid, bpm=samples[-1]["bpm"], out_of_gate_energy=leakage,
                   lock_fraction=float(np.mean([s["locked"] for s in samples])))
     result["checks"] = dict(snr=result["snr_db"] >= 12,
-                            coverage=.08 <= result["silhouette_coverage"] <= .45
+                            coverage=(.15 if portrait else .08) <= result["silhouette_coverage"]
+                            <= (.35 if portrait else .45)
                             and result["localized_fraction"] >= .75,
-                            iou=result["frame_iou"] >= .75,
+                            iou=result["frame_iou"] >= (.80 if portrait else .75),
                             stereo=imbalance <= .15 and total > 0,
                             breathing=bpm_valid, range_gate=leakage == 0.)
+    if portrait:
+        result["subject_fraction"] = float(np.mean([s["subject"] for s in samples]))
+        result["checks"]["subject"] = result["subject_fraction"] >= .75
     return result
 
 
@@ -66,9 +70,9 @@ def capture(settings, seconds, folder, camera_enabled):
     best_coverage = 0.
     folder.mkdir(parents=True, exist_ok=True)
     health = dict(reason="diagnostic", remaining=seconds, simulated=False)
-    with AudioEngine(gain=settings.gain, imaging="chirp", max_seconds=seconds,
+    with AudioEngine(carriers=settings.carriers, gain=settings.gain, imaging="chirp", max_seconds=seconds,
                      settings=settings) as engine:
-        near = NearField(engine.channels, CARRIERS, settings=settings, probe=engine.tx.probe)
+        near = NearField(engine.channels, settings.carriers, settings=settings, probe=engine.tx.probe)
         with Worker(None, engine, nearfield=near, diagnostics=True) as worker, CameraOutput(camera_enabled) as camera:
             engine.tx.arm()
             start = deadline = monotonic()
@@ -77,7 +81,8 @@ def capture(settings, seconds, folder, camera_enabled):
                 if worker.error is not None:
                     raise RuntimeError("DSP worker failed") from worker.error
                 snap = worker.latest
-                frame = render_nearfield(snap, health, "pure")
+                draw = render_portrait if settings.low_band else render_nearfield
+                frame = draw(snap, health, "pure")
                 camera.latest = frame
                 if monotonic()-start >= .5:
                     mask, bounds = foreground(frame)
@@ -100,7 +105,7 @@ def capture(settings, seconds, folder, camera_enabled):
         faults, drops = engine.xruns, engine.ring.drops
     if not samples:
         raise RuntimeError("Diagnostic did not receive microphone frames.")
-    report = assess(samples, coverage, ious, widths)
+    report = assess(samples, coverage, ious, widths, settings.low_band)
     report.update(settings=asdict(settings), duration=seconds, output_seconds=output_seconds,
                   xruns=faults, drops=drops, camera_frames=camera.frames, camera_error=camera.error,
                   camera=camera.status, frames_scored=len(coverage), face_verified=False,
@@ -128,10 +133,11 @@ def capture(settings, seconds, folder, camera_enabled):
 
 
 def tune(settings, result):
-    if result["silhouette_coverage"] > .45 or result["out_of_gate_energy"] != 0.:
+    minimum, maximum = (.15, .35) if settings.low_band else (.08, .45)
+    if result["silhouette_coverage"] > maximum or result["out_of_gate_energy"] != 0.:
         return replace(settings, blanking_m=.18,
                        noise_multiplier=min(6, settings.noise_multiplier+.6))
-    if not result["checks"]["snr"] or result["silhouette_coverage"] < .08:
+    if not result["checks"]["snr"] or result["silhouette_coverage"] < minimum:
         return replace(settings, gain=min(MAX_TEST_GAIN, settings.gain*1.55),
                        alpha=max(.004, settings.alpha*.67),
                        noise_multiplier=max(3., settings.noise_multiplier-.30))
@@ -145,7 +151,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("sonar_debug"))
     parser.add_argument("--iterations", type=int, choices=(1, 2, 3), default=3)
-    parser.add_argument("--preset", choices=("standard", "wide", "stable"), default="standard")
+    parser.add_argument("--preset", choices=("default", "standard", "wide", "stable"), default="default")
     parser.add_argument("--start-gain", type=float)
     parser.add_argument("--no-virtual-cam", action="store_true")
     args = parser.parse_args()
@@ -153,7 +159,9 @@ def main():
     settings = load_settings()
     gain = settings.gain if args.start_gain is None else args.start_gain
     settings = replace(settings, gain=min(MAX_TEST_GAIN, gain))
-    if args.preset != "standard":
+    if args.preset == "standard":
+        settings = replace(settings, low_hz=17500, high_hz=21500)
+    if args.preset in ("wide", "stable"):
         settings = replace(settings, low_hz=17000, high_hz=22000)
     if args.preset == "stable":
         settings = replace(settings, persistence=.8, smoothing=.8)
@@ -162,7 +170,7 @@ def main():
         result = capture(settings, 6, args.output/f"burst-{i+1}", not args.no_virtual_cam)
         reports.append(result)
         print(json.dumps(result), flush=True)
-        if all(result["checks"][k] for k in ("snr", "coverage", "iou", "range_gate", "stereo", "stream")):
+        if all(value for key, value in result["checks"].items() if key != "breathing"):
             result = capture(settings, 20, args.output/"confirmation", not args.no_virtual_cam)
             reports.append(result)
             print(json.dumps(result), flush=True)

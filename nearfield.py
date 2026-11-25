@@ -36,7 +36,7 @@ class ChirpProbe:
         self.filters = []
         self.pilot_refs = []
         t = np.arange(CHIRP_SAMPLES)/RATE
-        window = signal.windows.tukey(CHIRP_SAMPLES, .26)
+        window = signal.windows.tukey(CHIRP_SAMPLES, .42 if settings.low_band else .26)
         frequencies = np.fft.fftfreq(PERIOD, 1/RATE)
         sweep = (settings.low_hz, settings.high_hz)
         for side, ends in enumerate((sweep, sweep[::-1])):
@@ -74,18 +74,20 @@ class ChirpProbe:
 class TorsoRate:
     """Track one continuous complex return and qualify its periodic rate."""
 
-    def __init__(self):
+    def __init__(self, window=30):
         self.sos = signal.butter(2, (.12, .55), fs=FRAME_RATE, btype="bandpass", output="sos")
+        self.window = window
         self.reset()
 
     def reset(self):
-        self.history = deque(maxlen=30*FRAME_RATE)
+        self.history = deque(maxlen=max(20, self.window)*FRAME_RATE+1)
         self.cell = None
         self.seconds = 0.
         self.next_update = 0.
         self.bpm = None
         self.quality = 0.
         self.wave = np.empty(0)
+        self.phase_wave = np.empty(0)
 
     def push(self, t, cell, iq):
         if self.cell is not None and (cell[:2] != self.cell[:2] or abs(cell[2]-self.cell[2]) > .045):
@@ -99,6 +101,17 @@ class TorsoRate:
             return
         self.next_update += .5
         z = np.array([value for _, value in self.history])
+        recent = z[-self.window*FRAME_RATE-1:]
+        estimates = self._estimate(recent)
+        if not estimates and len(z) > len(recent):
+            estimates = self._estimate(z, slow_only=True)
+        if estimates:
+            self.quality, rate, self.wave = max(estimates, key=lambda value: value[0])
+            self.bpm = rate if self.bpm is None else .68*self.bpm + .32*rate
+        else:
+            self.bpm, self.quality = None, 0.
+
+    def _estimate(self, z, slow_only=False):
         candidates = []
         for values, minimum in ((np.unwrap(np.angle(z)), .009),
                                 (abs(z)/(abs(z).mean()+1e-12), .006)):
@@ -106,14 +119,16 @@ class TorsoRate:
             filtered = signal.sosfiltfilt(self.sos, raw)
             candidates.append((filtered, raw, minimum))
         self.wave = max(candidates, key=lambda item: np.std(item[0]))[0]
-        if self.seconds < 7:
-            return
+        self.phase_wave = candidates[0][0]
+        seconds = (len(z)-1)/FRAME_RATE
+        if seconds < 7:
+            return []
         estimates = []
         for wave, raw, minimum in candidates:
             if np.std(wave) < minimum:
                 continue
             freq, power = signal.periodogram(raw, fs=FRAME_RATE, window="hann", nfft=4096)
-            band = (freq >= max(.12, 1.9/self.seconds)) & (freq <= .55)
+            band = (freq >= max(.12, 1.9/seconds)) & (freq <= (.20 if slow_only else .55))
             if not band.any():
                 continue
             i = np.argmax(np.where(band, power, 0))
@@ -121,15 +136,19 @@ class TorsoRate:
             if len(wave) < 2*period:
                 continue
             corr = np.corrcoef(wave[:-period], wave[period:])[0, 1]
+            rate = freq[i]*60
+            if self.window == 10:
+                lags = np.arange(max(1, round(.94*period)), min(len(wave)//2, round(1.06*period))+1)
+                correlations = [np.corrcoef(wave[:-lag], wave[lag:])[0, 1] for lag in lags]
+                if correlations:
+                    best = int(np.argmax(correlations))
+                    corr = correlations[best]
+                    rate = .7*rate + .3*60*FRAME_RATE/lags[best]
             purity = power[(freq >= .12) & (freq <= .55)].sum()/(power.sum()+1e-12)
             quality = min(corr, purity)
             if np.isfinite(quality) and quality >= .65:
-                estimates.append((quality, freq[i]*60, wave))
-        if estimates:
-            self.quality, rate, self.wave = max(estimates, key=lambda value: value[0])
-            self.bpm = rate if self.bpm is None else .68*self.bpm + .32*rate
-        else:
-            self.bpm, self.quality = None, 0.
+                estimates.append((quality, float(rate), wave))
+        return estimates
 
 
 class NearField:
@@ -140,7 +159,7 @@ class NearField:
         self.carriers = np.asarray(carriers)
         self.direct_path = direct_path
         self.ranges = RANGES
-        self.breath = TorsoRate()
+        self.breath = TorsoRate(10 if self.settings.low_band else 30)
         self.events = deque(maxlen=8)
         self.samples = np.zeros((PERIOD, channels))
         self.reset()
@@ -168,6 +187,9 @@ class NearField:
         self.last_valid = None
         self.last_gesture = -10
         self.position = None
+        self.subject = None
+        self.subject_age = 0
+        self.velocity = 0.
         self.track = deque()
         self.breath.reset()
 
@@ -216,6 +238,9 @@ class NearField:
         self.snr = 20*np.log10(np.maximum(snr.max(axis=1), 1e-5))
         self.locked = bool(valid.any())
         if not self.locked:
+            self.subject_age = max(0, self.subject_age-1)
+            if not self.subject_age:
+                self.subject = None
             self.echo_power = self.noise_power = 0.
             self.stereo_energy.fill(0)
             self.cir.fill(0)
@@ -235,7 +260,12 @@ class NearField:
             pilot = audio[(index[spk]+offsets[:, None]) % PERIOD, np.arange(self.channels)]
             pilots[spk] = abs(weights @ pilot)
         gain = np.maximum(peak, .6*np.minimum(pilots, 2.5*peak))
-        self.gain = gain.copy() if self.gain is None else np.maximum(.98*self.gain, gain)
+        if self.gain is None:
+            self.gain = gain.copy()
+        elif self.settings.low_band:
+            self.gain = np.sqrt(np.where(valid, .94*self.gain**2+.06*gain**2, self.gain**2))
+        else:
+            self.gain = np.maximum(.98*self.gain, gain)
         rows = np.rint((RANGES-self.direct_path/2)/METRES_PER_SAMPLE).astype(int)
         ordered = profiles.transpose(0, 2, 1)
         arrivals = np.take_along_axis(ordered, (index[:, :, None]+rows) % PERIOD, axis=2)
@@ -357,10 +387,34 @@ class NearField:
         if motion:
             _, depth, x, horizontal = max(motion)
             self.position = (x, depth) if horizontal else None
+            if self.track:
+                previous = self.track[-1]
+                self.velocity = float(np.clip((depth-previous[1])/max(t-previous[0], .04), -3, 3))
             self._gesture(t, depth, x, horizontal)
         elif self.track and t-self.track[-1][0] > .14:
             self.track.clear()
         self._track_torso(measured, clean, valid, t)
+        if self.settings.low_band:
+            self._track_subject(power, valid)
+
+    def _track_subject(self, power, valid):
+        if self.breath.cell is None or self.noise_power <= 0:
+            self.subject_age = max(0, self.subject_age-1)
+            return
+        _, _, depth = self.breath.cell
+        paths = power[:, :, abs(RANGES-depth) < .035].sum(axis=2)
+        side = paths.sum(axis=1)
+        if side.sum() < 16*self.noise_power:
+            self.subject_age = max(0, self.subject_age-1)
+            return
+        if valid.any(axis=1).all() and side.min() > 3*self.noise_power:
+            x = float(np.clip(1.25*(side[1]-side[0])/side.sum(), -1, 1))
+        else:
+            x = self.subject[0] if self.subject else 0.
+        if self.subject is not None:
+            x, depth = .78*np.asarray(self.subject)+.22*np.array((x, depth))
+        self.subject = (float(x), float(depth))
+        self.subject_age = min(8, self.subject_age+1)
 
     def _gesture(self, t, depth, x, horizontal):
         if self.track and (t-self.track[-1][0] > .14 or abs(depth-self.track[-1][1]) > .06):
@@ -385,7 +439,7 @@ class NearField:
         self.track.clear()
 
     def _track_torso(self, measured, clean, valid, t):
-        zone = (RANGES >= .25) & (RANGES <= .85)
+        zone = (RANGES >= (.35 if self.settings.low_band else .25)) & (RANGES <= .85)
         score = abs(measured)*zone
         variation = np.minimum(abs(clean), score)
         if self.torso_activity is None:

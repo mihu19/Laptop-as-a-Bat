@@ -1,6 +1,6 @@
 # Laptop-as-a-Bat
 
-Bat Cam uses a Windows laptop's speakers and microphone array as a near-field sonar. It auto-arms at launch, estimates echo range and relative left/right position, and sends the shaded view to an OpenCV preview and OBS Virtual Camera at a target of 1280 × 720 and 30 FPS.
+Bat Cam uses a Windows laptop's speakers and microphone array as a near-field sonar. It auto-arms at launch and uses qualified echo range and lateral estimates to place a generic, shaded face and upper-body model in a 1280 × 720 OpenCV and OBS Virtual Camera feed at a target of 30 FPS.
 
 ## Run
 
@@ -12,7 +12,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe main.py
 ~~~
 
-The live app starts transmitting as soon as the audio stream and preview are ready. It uses the existing −48 dBFS default peak gain per channel and shuts down at its configured output limits. The range view adapts while you remain in front of the laptop. Use the following command for a silent preview.
+The live app starts transmitting as soon as the audio stream and preview are ready. The 14.5–17.5 kHz probe may be audible. It uses the existing −48 dBFS default peak gain per channel and shuts down at its configured output limits. Use the following command for a silent preview.
 
 ~~~powershell
 .\.venv\Scripts\python.exe main.py --simulate --no-virtual-cam
@@ -40,11 +40,11 @@ The camera mode needs no calibration keys. Gesture detection uses tracks from ra
 
 ## What the camera measures
 
-- Each speaker takes a turn transmitting a 512-sample, Tukey-windowed chirp over 17.5–21.5 kHz. Its 18.5 or 20.5 kHz pilot fits in the slot after the chirp. Audio runs at 48 kHz. A range update is computed up to 25 times a second, independently of the webcam's 30 FPS frame clock.
+- Each speaker takes a turn transmitting a 512-sample, Tukey-windowed chirp over 14.5–17.5 kHz. Its 14.8 or 16.8 kHz pilot fits in the slot after the chirp. Audio runs at 48 kHz. A range update is computed up to 25 times a second, independently of the webcam's 30 FPS frame clock.
 - Stereo matched filtering separates the two chirps. Direct-path estimates and rolling band gains normalize the paths automatically. The room model updates at alpha 0.02. A stationary return can fade as the model learns it. Nearby movement and chest micro-motion refresh the image.
-- The processor admits taps estimated at 0.15–0.95 m to image, gesture and breathing processing. The delay samples are spaced 3.57 mm apart. With 4 kHz of bandwidth, ideal reflector separation is about 4.3 cm, and the effective bandwidth on laptop transducers can be narrower. Device geometry, noise and multipath affect where an echo is estimated, especially close to a gate edge. The default reference path is 0.15 m. Use `--direct-path-m` to supply a measured speaker-to-mic distance. [Pulse compression and range resolution](https://www.ll.mit.edu/sites/default/files/outreach/doc/2018-07/lecture%205.pdf)
-- Nearer echoes render brighter in a perspective range-versus-lateral mesh. Contours and reticles come from the supported echoes. The horizontal laptop array provides two useful spatial axes. Measuring face geometry, elevation, yaw or distinguishing shoulders from the torso would require additional spatial measurements.
-- Breathing uses a stable high-SNR return in the 0.25–0.85 m zone. It combines complex phase and amplitude with a 0.12–0.55 Hz bandpass, spectral peak and autocorrelation. It updates twice a second after at least 7 seconds of signal and about two consistent breathing cycles. Slow breathing requires a longer window. BPM is withheld when confidence is insufficient.
+- The processor admits taps estimated at 0.15–0.95 m to image, gesture and breathing processing. The delay samples are spaced 3.57 mm apart. With 3 kHz of bandwidth, ideal reflector separation is about 5.7 cm. Device geometry, noise and multipath can shift estimated echo ranges. Use `--direct-path-m` to supply a measured speaker-to-mic distance. [Pulse compression and range resolution](https://www.ll.mit.edu/sites/default/files/outreach/doc/2018-07/lecture%205.pdf)
+- Range drives portrait scale and brightness. Stereo contrast moves the model laterally and adds a small apparent turn. Modeled facial features and apparent yaw are illustrative. The debug view shows gated acoustic returns, and detected gestures add a range-positioned ripple to the portrait.
+- Breathing uses a stable high-SNR return in the 0.35–0.85 m zone. It combines complex phase and amplitude with a 0.12–0.55 Hz bandpass and autocorrelation. The estimator primarily uses a 10-second window and retains 20 seconds for slower cycles. The phase-derived displacement scales chest animation when breathing confidence qualifies.
 
 ## Limits and diagnostics
 

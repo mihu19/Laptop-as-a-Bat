@@ -275,6 +275,71 @@ def render_nearfield(snapshot, health, view):
     return frame
 
 
+PORTRAIT_Y, PORTRAIT_X = np.mgrid[-1:1:180j, -1:1:320j].astype(np.float32)
+
+
+def render_portrait(snapshot, health, view):
+    """Shade a generic relief model located by acoustic range and lateral estimates."""
+    if view == "debug":
+        return render_nearfield(snapshot, health, view)
+    frame = cv2.convertScaleAbs(render_nearfield(snapshot, health, "pure"), alpha=.28)
+    subject = snapshot.get("subject")
+    if subject is not None and snapshot["state"] == "sensing":
+        lateral, depth = subject
+        scale = np.clip(.57/depth, .65, 1.35)
+        x = (PORTRAIT_X-.42*lateral)/scale
+        y = (PORTRAIT_Y-.04)/scale
+        yaw = .16*lateral
+        chest = np.clip(snapshot.get("chest_displacement", 0.)/.004, -.5, .5)
+
+        def shape(cx, cy, width, height):
+            return np.sqrt(np.maximum(1-((x-cx)/width)**2-((y-cy)/height)**2, 0))
+
+        head = shape(.03*yaw, -.34, .27, .49)
+        jaw = shape(yaw*.12, -.13, .205, .32)
+        shoulders = shape(0, .62, .73*(1+.045*chest), .44)
+        neck = shape(0, .19, .15, .31)
+        surface = np.maximum.reduce((.70*head, .63*jaw, .49*shoulders, .44*neck))
+        face = np.maximum(head, jaw)
+        nose = np.exp(-((x-.37*yaw)/.055)**2-((y+.28)/.14)**2)
+        brows = np.exp(-((abs(x-.19*yaw)-.105)/.085)**2-((y+.48)/.045)**2)
+        cheeks = np.exp(-((abs(x-.19*yaw)-.145)/.093)**2-((y+.22)/.10)**2)
+        mouth = np.exp(-((x-.19*yaw)/.13)**2-((y+.095)/.016)**2)
+        surface += face*(.23*nose+.10*brows+.13*cheeks-.08*mouth)
+        surface = surface.astype(np.float32, copy=False)
+        dx = cv2.Sobel(surface, cv2.CV_32F, 1, 0, ksize=3)
+        dy = cv2.Sobel(surface, cv2.CV_32F, 0, 1, ksize=3)
+        light = np.clip(.78+.28*dx-.24*dy, .48, 1.12)
+        intensity = np.uint8(255*np.clip(surface*light*(1.12-.48*depth), 0, 1))
+        portrait = cv2.applyColorMap(intensity, cv2.COLORMAP_INFERNO)
+        portrait[intensity == 0] = 0
+        np.maximum(frame, cv2.resize(portrait, (WIDTH, HEIGHT)), out=frame)
+    events = snapshot["events"]
+    age = snapshot["time"]-events[-1].time if events else 10.
+    position = snapshot.get("position")
+    if position and 0 <= age < .8 and snapshot["state"] == "sensing":
+        x, depth = position
+        center = (round(WIDTH*(.50+.37*x)), round(HEIGHT*(1-(depth-.15)/.8)))
+        radius = min(90, round(20+60*age+12*abs(snapshot["velocity"])))
+        cv2.circle(frame, center, radius, (96, 121, 235), 2, cv2.LINE_AA)
+        cv2.drawMarker(frame, center, (154, 187, 255), cv2.MARKER_CROSS, 17, 1)
+    if view == "pure":
+        return frame
+    label(frame, "BAT CAM   /   ACOUSTIC MODEL", 29, 41, .60)
+    status = f"Z {subject[1]*100:.0f} cm" if subject else "Waiting for a stable torso echo"
+    label(frame, status if snapshot["state"] == "sensing" else "Muted", 29, 68, .45, DIM)
+    if health.get("simulated"):
+        label(frame, "SYNTHETIC", 29, 92, .43, AMBER)
+    bpm = snapshot["range_bpm"]
+    if bpm is not None:
+        label(frame, f'{bpm:.1f} BPM  {snapshot["range_quality"]:.0%}', 1040, 42, .62, MINT)
+    if events and age < 1.4 and snapshot["state"] == "sensing":
+        label(frame, events[-1].name.upper(), 29, HEIGHT-58, .79, AMBER, 2)
+    label(frame, f'{health["reason"]}   {health["remaining"]:.0f}s available', 29, HEIGHT-28, .47, DIM)
+    label(frame, "V  view     H  hide     M  mute     R  reset timer", 849, HEIGHT-28, .47, DIM)
+    return frame
+
+
 class CameraOutput:
     """The UI remains responsive during backend open, pacing and send failures."""
 

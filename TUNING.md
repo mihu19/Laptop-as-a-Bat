@@ -13,3 +13,7 @@ The Realtek endpoints ran at 48 kHz. Seven bursts emitted for a combined 41.98 s
 | Final verification with localization check | Repeated stability settings | 20.6 dB | Detectable returns appeared in 1.3% of scored acoustic samples. Peak foreground coverage reached 5.1%, with median coverage and IoU at zero, stereo imbalance of 37.9%, and no BPM reading. |
 
 All trials had zero energy in the post-gate output outside the represented range. None met the median SNR, connected foreground coverage, IoU, stereo balance or breathing checks. Peak SNR describes a momentary return. The wide-band result illustrates why a stable transmit timing reference alone is insufficient for imaging. No settings qualified for promotion.
+
+## Low-band portrait trials
+
+Two six-second Realtek captures used a 14.5–17.5 kHz sweep and 14.8/16.8 kHz positioning pilots. At gain 0.00398 the tuner found no usable in-gate echoes. At gain 0.010 the probe timing reference held throughout, but a usable return appeared in 23.6% of scored samples and came from only one speaker path. Peak SNR was 17.9 dB. Median coverage and IoU were zero, BPM was unavailable, and neither trial qualified for promotion. OBS received 361 frames across the two trials with zero reported audio faults or dropped blocks.

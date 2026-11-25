@@ -19,7 +19,7 @@ from dsp_processor import DSPProcessor
 from nearfield import NearField, NearFieldDemo
 from sonar_imaging import RangeCamera, demo_echo
 from sonar_settings import load_settings
-from visualizer_cam import CameraOutput, FPS, HEIGHT, WIDTH, render, render_nearfield, render_sonar
+from visualizer_cam import CameraOutput, FPS, HEIGHT, WIDTH, render, render_nearfield, render_portrait, render_sonar
 
 
 def wav_input(path):
@@ -102,6 +102,9 @@ class Worker:
     def snapshot(self):
         if self.nearfield is not None:
             near = self.nearfield
+            phase = near.breath.phase_wave
+            displacement = (float(343*phase[-1]/(4*np.pi*near.carriers.mean()))
+                            if phase.size and near.breath.bpm is not None else 0.)
             snapshot = dict(time=self.blocks*HOP/RATE, state="sensing" if self.active else "muted",
                         ready=True, depth=near.grid.copy(), depth_locked=near.locked,
                         range_bpm=near.breath.bpm, range_quality=near.breath.quality,
@@ -109,12 +112,15 @@ class Worker:
                         events=tuple(near.events), snr=near.snr.copy(), bpm=None,
                         gated_spectrum=near.spec.copy(),
                         gated_waterfall=np.array(near.waterfall).copy(), position=near.position,
-                        smoothing=near.settings.smoothing)
+                        smoothing=near.settings.smoothing, velocity=near.velocity,
+                        subject=near.subject if near.subject_age >= 4 else None,
+                        chest_displacement=displacement)
             if self.diagnostics:
                 snapshot["tuning"] = dict(time=snapshot["time"], locked=near.locked,
                                           echo=near.echo_power, noise=near.noise_power,
                                           energy=near.stereo_energy.copy(), cir=near.cir.copy(),
                                           bpm=near.breath.bpm, grid=snapshot["depth"],
+                                          subject=snapshot["subject"] is not None,
                                           wave=float(np.var(near.breath.wave)) if near.breath.wave.size else 0.)
             return snapshot
         snap = self.dsp.snapshot()
@@ -243,8 +249,10 @@ def run(args):
     if not 0 <= args.direct_path_m <= 1:
         raise ValueError("Direct-path length must be between 0 and 1 metre.")
     recording = wav_input(args.replay) if args.replay else None
-    carriers = validate_carriers((args.left_freq, args.right_freq))
     near_enabled = not args.doppler_only and (recording is None or args.nearfield_replay)
+    default_carriers = settings.carriers if near_enabled else CARRIERS
+    carriers = validate_carriers((default_carriers[0] if args.left_freq is None else args.left_freq,
+                                  default_carriers[1] if args.right_freq is None else args.right_freq))
     if recording is None and not args.simulate:
         engine = AudioEngine(args.input_device, args.output_device, carriers, gain,
                              args.exclusive, args.session_seconds, args.duty_window,
@@ -302,7 +310,8 @@ def run(args):
                           drops=engine.ring.drops if engine else 0,
                           simulated=args.simulate)
             if near_enabled:
-                frame = render_nearfield(snap, health, view)
+                frame = (render_portrait(snap, health, view) if settings.low_band
+                         else render_nearfield(snap, health, view))
             elif view == "debug":
                 frame = render(snap, health)
             else:
@@ -372,8 +381,8 @@ def parser():
     p.add_argument("--list-devices", action="store_true")
     p.add_argument("--input-device", type=int, help="WASAPI microphone ID")
     p.add_argument("--output-device", type=int, help="WASAPI stereo speaker ID")
-    p.add_argument("--left-freq", type=float, default=CARRIERS[0])
-    p.add_argument("--right-freq", type=float, default=CARRIERS[1])
+    p.add_argument("--left-freq", type=float)
+    p.add_argument("--right-freq", type=float)
     p.add_argument("--max-volume", type=float, help="override the configured linear peak amplitude")
     p.add_argument("--session-seconds", type=float, default=120,
                    help="maximum continuous and cumulative on-time in the duty window, up to 120 s")
