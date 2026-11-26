@@ -163,13 +163,15 @@ class TorsoRate:
 
 
 class NearField:
-    def __init__(self, channels, carriers, direct_path=.15, settings=None, probe=None, spatial=None):
+    def __init__(self, channels, carriers, direct_path=.15, settings=None, probe=None, spatial=None,
+                 zone_tracker=None):
         self.settings = settings or SonarSettings()
         self.probe = probe or ChirpProbe(carriers, self.settings)
         self.channels = channels
         self.carriers = np.asarray(carriers)
         self.direct_path = direct_path
         self.spatial = spatial
+        self.zone_tracker = zone_tracker
         self.ranges = RANGES
         self.breath = TorsoRate(10 if self.settings.low_band else 30)
         self.events = deque(maxlen=8)
@@ -206,6 +208,8 @@ class NearField:
         self.breath.reset()
         if self.spatial is not None:
             self.spatial.reset()
+        if self.zone_tracker is not None:
+            self.zone_tracker.reset()
 
     def push(self, block):
         offset = block.start % PERIOD
@@ -257,6 +261,8 @@ class NearField:
         if not self.locked:
             if self.spatial is not None:
                 self.spatial.lost()
+            if self.zone_tracker is not None:
+                self.zone_tracker.lost()
             self.subject_age = max(0, self.subject_age-1)
             if not self.subject_age:
                 self.subject = None
@@ -290,6 +296,8 @@ class NearField:
         arrivals = np.take_along_axis(ordered, (index[:, :, None]+rows) % PERIOD, axis=2)
         direct = np.take_along_axis(ordered, index[:, :, None], axis=2)
         self.iq = arrivals/(direct+1e-12)
+        if self.zone_tracker is not None:
+            self.zone_tracker.update(self.iq, valid)
 
         # Estimate and subtract out-of-gate paths as nuisance terms before
         # accepting any matched peak. They never enter the scene or trackers.

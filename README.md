@@ -1,6 +1,6 @@
 # Laptop-as-a-Bat
 
-Bat Cam uses a Windows laptop's speakers and microphone array as a near-field sonar. The 1280 × 720 preview and OBS Virtual Camera share one dashboard. It shows measured echoes by distance and time, or an experimental front projection using multiple sound paths.
+Bat Cam uses a Windows laptop's speakers and microphone array as a near-field sonar. The 1280 × 720 preview and OBS Virtual Camera share one dashboard. The default view shows a live echo profile, range history and an estimated top-down footprint when several sound paths agree.
 
 ## Run
 
@@ -12,7 +12,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe main.py
 ~~~
 
-The default live mode opens the sonar view and measures the room's input-band noise for three seconds with the transmitter muted. It then arms automatically. The 12.0–16.5 kHz probe may be audible. It uses the existing −48 dBFS default peak gain per channel and stops at its configured output limits. Use the following command for a silent preview.
+Keep the area in front of the laptop clear at launch. After three seconds Bat Cam starts the audible 6–13.5 kHz probe and measures the empty room. When the dashboard asks you to move an object into range, place it about 30–75 cm away near laptop height. The probe uses the existing −48 dBFS default peak gain per channel and stops at its configured output limits. Use the following command for a silent preview.
 
 ~~~powershell
 .\.venv\Scripts\python.exe main.py --simulate --no-virtual-cam
@@ -26,9 +26,19 @@ The simulator uses generated microphone samples and an acoustic room model. It t
 .\.venv\Scripts\python.exe main.py --spatial
 ~~~
 
-Start with the area in front of the laptop clear. Press **M** to start the audible 6–13.5 kHz stereo probe and wait for room calibration. Then sit facing the laptop and move a hand about 30–75 cm away. Recalibrate after moving the laptop or changing the lid angle. Add `--simulate` to preview the dashboard with two moving point reflectors and no speaker output.
+`--spatial` opens the same viewer with manual arming. Clear the area, press **M**, and wait for room calibration. Recalibrate after moving the laptop or changing the lid angle. Add `--simulate` to try the dashboard with moving reflectors and no speaker output.
 
-Each speaker uses different subcarriers so the app can recover four speaker-to-microphone paths from two capture channels. It subtracts the empty-room profile and projects locations where at least three calibrated paths agree. Axis positions use approximate laptop geometry. The projection can show patches of moving reflectors, and its accuracy depends on the laptop, room and echo strength. Full body shape remains unresolved. The dashboard keeps a separate range history for echoes without enough spatial evidence, including mono input.
+Each speaker uses different subcarriers so the app can recover four speaker-to-microphone paths from two capture channels. It subtracts the empty-room profile and plots locations where at least two calibrated paths agree near laptop height. The footprint shows reflecting patches. Its width and shape depend on echo strength, room acoustics and the estimated laptop geometry. The echo profile and range history remain available even when the footprint is blank, including on mono input.
+
+### Learn left, center and right
+
+~~~powershell
+.\.venv\Scripts\python.exe main.py --learn-zones
+~~~
+
+Clear the area and press **M** to start the audible spatial probe. After the room reference, the dashboard guides you through 12 short trials. Press **C** on each prompt. You have two seconds to step clear for an **Empty** trial or move into the indicated zone. Face the laptop from about 35–75 cm away. Gently shift in place until the next prompt appears. Keep the laptop, lid angle and volume fixed during all trials.
+
+The model learns from room-subtracted echo windows, including weak reflections below the spatial projection threshold. The last four trials are held out before training. A profile is saved only when at least 75% of those checks are correct, each person zone scores at least 60%, and clear-area checks score at least 80%. Bat Cam saves model parameters locally and mutes when calibration ends. Run `--spatial` with the same audio route, gain and room setup to use the profile. Zone labels are estimates of coarse position. This is a check in one room and session. [EcholocationDNN research code](https://github.com/OptMLGroup/EcholocationDNN)
 
 ### OFDM motion tracking
 
@@ -38,7 +48,7 @@ Each speaker uses different subcarriers so the app can recover four speaker-to-m
 
 Clear the area in front of the laptop and press **M** to start the probe. Stand clear until the empty-room measurement finishes, then move toward or away from the laptop in the 25–150 cm range. The measured echoes enter the trail at the right edge and move vertically as the distance changes. The dashboard reports a tracked range after several echo readings agree. Press **M** to mute, then press it again with the area clear to recalibrate. Select **OBS Virtual Camera** in the receiving app.
 
-The OFDM tracker adapts the 6–10 kHz sounder and channel estimation from [Laptop Acoustic Radar](https://github.com/enricguaschmesia-lab/laptop-acoustic-radar/tree/b00695c5472ce705532aaa1cb02bf3a87d2cceba) and applies Bat Cam's existing transmission caps. The probe is audible. Add `--simulate` for a silent demonstration. The dashboard shows chirp-based gesture and breathing readouts when launched without `--ofdm`.
+The OFDM tracker adapts the 6–10 kHz sounder and channel estimation from [Laptop Acoustic Radar](https://github.com/enricguaschmesia-lab/laptop-acoustic-radar/tree/b00695c5472ce705532aaa1cb02bf3a87d2cceba) and applies Bat Cam's existing transmission caps. The probe is audible. Add `--simulate` for a silent demonstration. Use `--chirp` for the gesture and breathing readouts.
 
 ### Windows audio and OBS
 
@@ -54,7 +64,7 @@ Install the OBS Studio Virtual Camera component. Leave OBS's own virtual-camera 
 | **R** | Reset the demo timer and resume when exposure budget permits. |
 | **Esc** or **Q** | Mute and close the app. |
 
-The default chirp mode needs no calibration keys. Gesture detection uses tracks from range-gated echoes. Push approaches the laptop, Pull moves away, and Swipe Left/Right changes relative lateral position.
+Chirp mode needs no calibration keys. Gesture detection uses tracks from range-gated echoes. Push approaches the laptop, Pull moves away, and Swipe Left/Right changes relative lateral position.
 
 ## What the camera measures
 
@@ -81,7 +91,9 @@ Peak amplitude is capped at approximately −30 dBFS per channel. The default ro
 | Option | Purpose |
 | --- | --- |
 | `--no-virtual-cam` | Run with the OpenCV preview only. |
-| `--spatial` | Use the experimental stereo echo projection on the same dashboard. |
+| `--spatial` | Open the stereo echo dashboard with manual arming. |
+| `--chirp` | Open the original gesture and breathing dashboard. |
+| `--learn-zones` | Record short live trials and validate a local position profile. |
 | `--ofdm` | Use the OFDM tracker on the same dashboard. |
 | `--muted` | Open the live app without transmitting until you press M. |
 | `--headless --duration S` | Run a timed smoke test without a preview. Physical output is muted by default. |

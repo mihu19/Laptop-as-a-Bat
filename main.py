@@ -23,6 +23,7 @@ from ofdm_ranging import OfdmDemo, OfdmSounder, OfdmTracker
 from sonar_imaging import RangeCamera, demo_echo
 from sonar_settings import load_settings
 from spatial_imaging import SpatialDemo, SpatialImager
+from zone_tracking import ZoneTracker, load_profile
 from visualizer_cam import (
     CameraOutput, ECHO_HISTORY_FRAMES, FPS, HEIGHT, WIDTH, render, render_echo_map, render_sonar,
 )
@@ -150,7 +151,10 @@ class Worker:
                 spatial = near.spatial
                 snapshot["spatial"] = dict(image=spatial.image.copy(), status=spatial.status,
                                            paths=spatial.valid_paths, ready=spatial.ready,
-                                           echo_paths=spatial.echo_paths, x=spatial.x, y=spatial.y)
+                                           echo_paths=spatial.echo_paths, x=spatial.x, y=spatial.y,
+                                           footprint=spatial.footprint.copy(), distance=spatial.depth)
+            if near.zone_tracker is not None:
+                snapshot["zones"] = near.zone_tracker.snapshot(self.active)
             if self.model is not None:
                 ml = self.model
                 snapshot.update(subject=tuple(ml.subject) if ml.subject is not None else None,
@@ -304,6 +308,12 @@ class Worker:
         self.expected = block.start+HOP
         self.active = active
         if active:
+            if near.zone_tracker is not None:
+                try:
+                    self.commands.get_nowait()
+                    near.zone_tracker.begin()
+                except Empty:
+                    pass
             if self.first_emit is None:
                 self.first_emit = block.start/RATE
             near.push(block)
@@ -331,6 +341,8 @@ def run(args):
         raise ValueError("Duration must be a finite positive number.")
     if args.transmit and (not args.headless or args.duration is None):
         raise ValueError("--transmit requires --headless and a bounded --duration.")
+    if args.learn_zones and (args.headless or args.simulate or args.replay):
+        raise ValueError("Zone calibration requires the interactive live dashboard.")
     settings = load_settings()
     gain = settings.gain if args.max_volume is None else args.max_volume
     if not (0 < gain <= MAX_GAIN):
@@ -338,6 +350,13 @@ def run(args):
     if not 0 <= args.direct_path_m <= 1:
         raise ValueError("Direct-path length must be between 0 and 1 metre.")
     ofdm_enabled = args.ofdm or args.view == "avatar"
+    default_spatial = not (args.spatial or args.learn_zones or args.chirp or ofdm_enabled
+                           or args.doppler_only or args.view or args.replay
+                           or args.nearfield_replay or args.ranging_replay
+                           or args.left_freq is not None or args.right_freq is not None)
+    if args.chirp and (args.spatial or args.learn_zones or ofdm_enabled):
+        raise ValueError("Choose a single probe mode.")
+    args.spatial = args.spatial or args.learn_zones or default_spatial
     if ofdm_enabled and (args.doppler_only or args.nearfield_replay or args.ranging_replay
                          or args.left_freq is not None or args.right_freq is not None):
         raise ValueError("OFDM sensing uses a fixed probe and requires an OFDM WAV for replay.")
@@ -378,7 +397,17 @@ def run(args):
         spatial = SpatialImager(args.direct_path_m, channels) if args.spatial else None
         if spatial is not None and probe is None:
             probe = ChirpProbe(carriers, settings, multicarrier=True)
-        near = NearField(channels, carriers, args.direct_path_m, settings, probe, spatial) if near_enabled else None
+        zones = None
+        if spatial is not None and engine is not None and channels == 2:
+            identity = dict(devices=[sd.query_devices(index)["name"] for index in engine.devices],
+                            channels=channels, rate=RATE, direct_path=args.direct_path_m,
+                            exclusive=args.exclusive, gain=gain)
+            profile = None if args.learn_zones else load_profile(identity)
+            if args.learn_zones or profile is not None:
+                zones = ZoneTracker(identity, args.learn_zones, profile)
+        if args.learn_zones and zones is None:
+            raise ValueError("Zone calibration requires a two-channel microphone input.")
+        near = NearField(channels, carriers, args.direct_path_m, settings, probe, spatial, zones) if near_enabled else None
         ofdm = OfdmTracker(probe or OfdmSounder(HOP), channels, args.direct_path_m) if ofdm_enabled else None
         has_legacy_probe = recording is not None and args.ranging_replay and not near_enabled
         range_cam = RangeCamera(channels, carriers, direct_path=args.direct_path_m) if has_legacy_probe else None
@@ -394,6 +423,8 @@ def run(args):
             if ofdm_enabled or args.spatial:
                 if args.transmit:
                     engine.tx.arm()
+                elif default_spatial and not args.headless and not args.muted:
+                    auto_arm = True
             elif near_enabled and not args.muted and (not args.headless or args.transmit):
                 if model is None:
                     engine.tx.arm()
@@ -405,6 +436,7 @@ def run(args):
         previous_blocks = 0
         next_diagnostic = begin
         peak_inference = 0.
+        last_capture_key = -np.inf
         while True:
             now = monotonic()
             if worker.error is not None:
@@ -417,6 +449,9 @@ def run(args):
                     raise RuntimeError("Audio stream stopped delivering callbacks.")
             snap = worker.latest
             tx = engine.tx if engine else None
+            guided_finished = zones is not None and snap["zones"]["finished"]
+            if guided_finished and tx.armed:
+                tx.mute("zone calibration complete")
             if auto_arm and now-begin >= 3:
                 auto_arm = False
                 tx.arm()
@@ -434,7 +469,8 @@ def run(args):
                           reason=tx.reason if tx else "playback disabled",
                           xruns=engine.xruns if engine else 0,
                           drops=engine.ring.drops if engine else 0,
-                          simulated=args.simulate, replay=recording is not None)
+                          simulated=args.simulate, replay=recording is not None,
+                          auto_arm=auto_arm)
             if ofdm_enabled or near_enabled:
                 frame = render_echo_map(snap, health)
             elif view == "debug":
@@ -456,13 +492,17 @@ def run(args):
                         tx.mute()
                     break
                 key = key | 32
-                if tx and key in (32, ord("m")):
+                if args.learn_zones and key == ord("c"):
+                    if now-last_capture_key > .45 and not guided_finished:
+                        worker.commands.put("zone trial")
+                    last_capture_key = now
+                if tx and not guided_finished and key in (32, ord("m")):
                     if auto_arm or tx.armed or tx.resume_at is not None:
                         auto_arm = False
                         tx.mute("muted")
                     elif snap["ready"]:
                         tx.arm()
-                if tx and key == ord("r") and snap["ready"]:
+                if tx and not guided_finished and key == ord("r") and snap["ready"]:
                     tx.arm(reset_demo=True)
                 if dsp is not None:
                     if key == ord("v"):
@@ -494,7 +534,13 @@ def run(args):
         spatial_snapshot = final_snapshot["spatial"]
         tracking_report.update(spatial_paths=spatial_snapshot["paths"],
                                spatial_ready=spatial_snapshot["ready"],
-                               spatial_pixels=int(np.count_nonzero(spatial_snapshot["image"])))
+                               spatial_pixels=int(np.count_nonzero(spatial_snapshot["footprint"])))
+    if zones is not None:
+        zone_snapshot = final_snapshot["zones"]
+        tracking_report.update(zone=zone_snapshot["position"],
+                               zone_validation=zone_snapshot["validation"],
+                               zone_validation_recall=zone_snapshot["recall"],
+                               zone_saved=zone_snapshot["saved"])
     print(json.dumps(dict(source=source, frames=frame_count, fps=round(frame_count/elapsed, 2),
                           shape=list(frame.shape), dtype=str(frame.dtype), blocks=worker.blocks,
                           stream_closed=engine.stream is None if engine else None,
@@ -531,6 +577,8 @@ def parser():
                    help="legacy view selector")
     p.add_argument("--ofdm", action="store_true", help="use the OFDM motion tracker in the sonar dashboard")
     p.add_argument("--spatial", action="store_true", help="enable experimental spatial echo imaging")
+    p.add_argument("--chirp", action="store_true", help="use the gesture and breathing dashboard")
+    p.add_argument("--learn-zones", action="store_true", help="teach left, center and right on this laptop")
     p.add_argument("--ranging-replay", action="store_true", help="WAV contains the Phase 3 multitone probe")
     p.add_argument("--nearfield-replay", action="store_true", help="WAV is aligned to the Phase 4 probe")
     p.add_argument("--doppler-only", action="store_true", help="run the original CW-only transmitter and debug view")

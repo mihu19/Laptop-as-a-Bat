@@ -8,6 +8,32 @@ from spatial_imaging import ROOM_FRAMES, SpatialDemo, SpatialImager
 
 
 class SpatialImagingTests(unittest.TestCase):
+    def test_two_paths_draw_a_footprint_and_one_path_leaves_it_blank(self):
+        imager = SpatialImager(.15, 2)
+        paths = np.array([[True, False], [True, False]])
+        stereo = np.array([[0., .001], [.001, 0.]])
+        room = np.zeros((2, 2, len(RANGES)), complex)
+        for _ in range(ROOM_FRAMES):
+            imager.update(room, paths, 1e-6, stereo)
+        self.assertTrue(imager.ready)
+        self.assertFalse(imager.footprint.any())
+
+        point = np.array([.12, .13, .60])
+        distance = (np.linalg.norm(imager.speakers-point, axis=1)[:, None]
+                    + np.linalg.norm(imager.microphones-point, axis=1)[None]
+                    - imager.direct_lengths + .15)/2
+        echoes = room.copy()
+        for i, j in zip(*np.nonzero(paths)):
+            echoes[i, j, abs(RANGES-distance[i, j]).argmin()] = .23
+        imager.update(echoes, paths, 1e-6, stereo)
+        x = abs(imager.x-point[0]).argmin()
+        depth = abs(imager.depth[::-1]-point[2]).argmin()
+        self.assertGreater(imager.footprint[depth-2:depth+3, x-2:x+3].max(), .25)
+        self.assertFalse(imager.image.any())
+        paths[0, 0] = False
+        imager.update(echoes, paths, 1e-6, stereo)
+        self.assertFalse(imager.footprint.any())
+
     def test_static_room_and_unconfirmed_paths_remain_blank(self):
         imager = SpatialImager(.15, 2)
         paths = np.ones((2, 2), dtype=bool)

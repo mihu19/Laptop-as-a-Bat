@@ -10,6 +10,7 @@ SPEAKERS = np.array([[-.145, 0., .16], [.145, 0., .16]])
 MICROPHONES = np.array([[-.04, .22, -.03], [.04, .22, -.03]])
 ROOM_FRAMES = 2*FRAME_RATE
 MIN_PATHS = 3
+FOOTPRINT_PATHS = 2
 
 
 class SpatialImager:
@@ -20,8 +21,9 @@ class SpatialImager:
         self.channels = channels
         self.x = np.linspace(-.55, .55, 45)
         self.y = np.linspace(.70, -.25, 39)
-        depth = np.linspace(.24, 1., 39)
-        points = np.stack(np.meshgrid(self.x, self.y, depth, indexing="xy"), axis=-1)
+        self.depth = np.linspace(.24, 1., 39)
+        self.footprint_band = (self.y >= .02) & (self.y <= .22)
+        points = np.stack(np.meshgrid(self.x, self.y, self.depth, indexing="xy"), axis=-1)
         to_speaker = np.linalg.norm(points-self.speakers[:, None, None, None, :], axis=-1)
         to_mic = np.linalg.norm(points-self.microphones[:, None, None, None, :], axis=-1)
         path = to_speaker[:, None]+to_mic[None]
@@ -35,23 +37,26 @@ class SpatialImager:
 
     def reset(self):
         self.image = np.zeros((len(self.y), len(self.x)), np.float32)
+        self.footprint = np.zeros((len(self.depth), len(self.x)), np.float32)
+        self.recent_echoes = np.zeros((4, len(RANGES)))
         self.room = [[] for _ in range(4)]
         self.anchors = [[] for _ in range(4)]
         self.ceiling = np.full((4, len(RANGES)), np.inf)
         self.calibrated = np.zeros(4, bool)
         self.bins = None
-        self.status = "Waiting for three timing paths"
+        self.status = "Waiting for two timing paths"
         self.valid_paths = 0
         self.echo_paths = 0
 
     @property
     def ready(self):
-        return bool(np.count_nonzero(self.calibrated) >= MIN_PATHS)
+        return bool(np.count_nonzero(self.calibrated) >= FOOTPRINT_PATHS)
 
     def update(self, echoes, valid, noise_power, audio, indices=None):
         self.valid_paths = int(np.count_nonzero(valid))
         self.echo_paths = 0
         self.image.fill(0)
+        self.footprint.fill(0)
         if self.channels != 2 or np.allclose(audio[:, 0], audio[:, 1], rtol=.002, atol=2e-7):
             self.status = "Two independent mic channels required"
             return
@@ -67,9 +72,10 @@ class SpatialImager:
                     self.calibrated[path] = True
                     self.room[path].clear()
         usable = valid.ravel() & self.calibrated
-        if np.count_nonzero(usable) < MIN_PATHS:
-            self.status = ("Learning the room   /   stand clear" if self.valid_paths >= MIN_PATHS
-                           else "Waiting for three timing paths")
+        if np.count_nonzero(usable) < FOOTPRINT_PATHS:
+            self.recent_echoes.fill(0)
+            self.status = ("Learning the room   /   stand clear" if self.valid_paths >= FOOTPRINT_PATHS
+                           else "Waiting for two timing paths")
             return
         if self.bins is None:
             self._align_paths()
@@ -78,6 +84,27 @@ class SpatialImager:
         threshold = np.maximum(.014, 2.5*np.sqrt(noise_power))
         excess = np.maximum(amplitude-self.ceiling-threshold, 0)
         self.echo_paths = int(np.count_nonzero(usable & (excess.max(axis=1) > .015)))
+        self.recent_echoes *= .70
+        np.maximum(self.recent_echoes, excess, out=self.recent_echoes)
+        self.recent_echoes[~usable] = 0
+        footprint_echoes = 5*gaussian_filter1d(self.recent_echoes, 2., axis=-1, mode="constant")
+        bins = self.footprint_bins
+        inside = self.inside[self.footprint_band]
+        footprint_views = footprint_echoes[self.path_index, bins]*inside
+        # Prefer pairs that include both speakers because their wider baseline
+        # distinguishes left from right more clearly than the microphone pair.
+        footprint_support = footprint_views.max(axis=1).min(axis=0)
+        if footprint_support.max() <= .014:
+            footprint_paths = footprint_views.reshape(4, *bins.shape[2:])[usable]
+            second = len(footprint_paths)-FOOTPRINT_PATHS
+            footprint_support = np.partition(footprint_paths, second, axis=0)[second]
+        footprint = footprint_support.max(axis=0).T[::-1]
+        footprint_floor = max(.014, .20*footprint.max())
+        self.footprint[:] = np.clip((footprint-footprint_floor)*6, 0, 1)
+
+        self.status = "Echo footprint estimated" if self.footprint.any() else "Move an object into range"
+        if np.count_nonzero(usable) < MIN_PATHS:
+            return
         # Weight closer delay matches more heavily within the timing tolerance.
         likelihood = 5*gaussian_filter1d(excess, 2., axis=-1, mode="constant")
         views = likelihood[self.path_index, self.bins].reshape(4, *self.inside.shape)
@@ -87,7 +114,6 @@ class SpatialImager:
         projection = (support*self.inside).max(axis=-1)
         floor = max(.018, .16*projection.max())
         self.image[:] = np.clip((projection-floor)*6, 0, 1)
-        self.status = "Corroborated echoes" if self.image.any() else "Waiting for a shared echo   /   move in range"
 
     def _align_paths(self):
         offsets = np.zeros(4)
@@ -103,12 +129,15 @@ class SpatialImager:
             offsets[measured] = (relative-np.median(relative))*SPEED/(2*RATE*self.step)
         shift = offsets.reshape(2, 2, 1, 1, 1)
         self.bins = np.clip(np.rint(self.delay_bins-shift), 0, len(RANGES)-1).astype(np.intp)
+        self.footprint_bins = self.bins[:, :, self.footprint_band]
 
     def lost(self):
         self.valid_paths = 0
         self.echo_paths = 0
         self.image.fill(0)
-        self.status = "Waiting for three timing paths"
+        self.footprint.fill(0)
+        self.recent_echoes.fill(0)
+        self.status = "Waiting for two timing paths"
 
 
 class SpatialDemo:

@@ -228,6 +228,7 @@ def render_echo_map(snapshot, health):
     room_ready = snapshot.get("room_ready")
     tracked_range = snapshot.get("tracked_range")
     spatial = snapshot.get("spatial")
+    zones = snapshot.get("zones")
 
     label(frame, "Bat Cam", 32, 58, 1.26, TEXT, 2)
     if not active:
@@ -235,6 +236,8 @@ def render_echo_map(snapshot, health):
                   if room_ready is not None or spatial is not None else "Probe muted")
     elif spatial is not None:
         status = spatial["status"]
+        if status == "Move an object into range" and has_echo:
+            status = "Range echoes detected   /   waiting for matching paths"
     elif not locked:
         status = "Waiting for probe timing"
     elif room_ready is False:
@@ -245,7 +248,12 @@ def render_echo_map(snapshot, health):
         status = "Waiting for an echo   /   move into range" if room_ready else "No echo in range"
     else:
         status = "Echo detected" if room_ready is None else "Checking echo stability"
-    status_ready = has_echo if spatial is None else spatial["image"].any()
+    status_ready = has_echo if spatial is None else spatial["footprint"].any()
+    if zones and (zones["learning"] or not status_ready):
+        status = zones["status"]
+        status_ready = zones["saved"] if zones["learning"] else zones["position"] in ("Left", "Center", "Right")
+    if health.get("auto_arm") and spatial is not None:
+        status = "Keep the area clear   /   starting in a moment"
     label(frame, status, 35, 91, .60, MINT if status_ready else DIM)
     if health.get("simulated"):
         source = "SIMULATION"
@@ -256,15 +264,14 @@ def render_echo_map(snapshot, health):
     source_size = cv2.getTextSize(source, cv2.FONT_HERSHEY_DUPLEX, .56, 1)[0][0]
     label(frame, source, WIDTH-34-source_size, 59, .56, AMBER if source != "LIVE MICROPHONE" else DIM)
 
-    panel(frame, 32, 116, 807, 536, "Front projection of echoes" if spatial is not None else "Echo trail")
+    panel(frame, 32, 116, 807, 536, "Estimated echo footprint" if spatial is not None else "Echo trail")
     left, right, top, bottom = 116, 812, 192, 554
     if spatial is not None:
-        left, right = 227, 647
-    label(frame, "Possible height (cm)" if spatial is not None else "Approx. distance (cm)",
-          52, 173, .47, DIM)
+        left, right = 202, 726
+    label(frame, "Approx. distance (cm)", 52, 173, .47, DIM)
     graph = frame[top:bottom+1, left:right+1]
     graph[:] = BG
-    vertical = ranges if spatial is None else spatial["y"][::-1]
+    vertical = ranges if spatial is None else spatial["distance"]
     ticks = np.linspace(vertical[0], vertical[-1], 5)
     for i, distance in enumerate(ticks):
         y = bottom-round(i*(bottom-top)/(len(ticks)-1))
@@ -274,14 +281,20 @@ def render_echo_map(snapshot, health):
         cv2.line(frame, (x, top), (x, bottom), LINE, 1)
     history = snapshot.get("echo_history")
     if active and spatial is not None:
-        paint_echoes(graph, spatial["image"])
+        paint_echoes(graph, spatial["footprint"])
     elif spatial is None and locked and history is not None and len(history):
         plot_echo_history(graph, history)
     if spatial is not None:
         label(frame, f'{spatial["x"][0]*100:.0f} cm', left-24, 580, .45, DIM)
         label(frame, "0", (left+right)//2-5, 580, .45, DIM)
         label(frame, f'{spatial["x"][-1]*100:.0f} cm', right-23, 580, .45, DIM)
-        label(frame, "Left / right (approx.)", 52, 628, .47, DIM)
+        label(frame, "Top view near laptop height", 52, 628, .47, DIM)
+        if zones and not zones["learning"]:
+            label(frame, "Learned zone", 52, 204, .47, DIM)
+            position = zones["position"]
+            label(frame, position or "--", 52, 239, .70, MINT if position else DIM)
+            if position:
+                label(frame, zones["detail"], 52, 263, .37, DIM)
     else:
         label(frame, "3 s ago", left, 580, .51, DIM)
         label(frame, "Now", right-35, 580, .51, DIM)
@@ -325,7 +338,10 @@ def render_echo_map(snapshot, health):
     else:
         label(frame, "Tracked range", 874, 462, .48, DIM)
         label(frame, f"~{tracked_range*100:.0f} cm" if tracked_range is not None else "--", 874, 498, .73)
-    label(frame, "M  mute / arm     Esc  exit", 33, 689, .48, DIM)
+    controls = "M  mute / arm     Esc  exit"
+    if zones and zones["learning"]:
+        controls = zones["detail"] if zones["finished"] else f'{zones["detail"]}     C  capture     M  mute'
+    label(frame, controls, 33, 689, .48, DIM)
     if spatial is not None:
         label(frame, "Estimated laptop geometry", 1001, 689, .46, DIM)
     return frame

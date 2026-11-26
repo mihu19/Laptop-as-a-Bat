@@ -9,3 +9,4 @@ sonar_config.tmp
 sonar_debug/
 models/*.joblib
 models/*.tmp
+models/zone_tracker.json
